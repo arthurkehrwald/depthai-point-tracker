@@ -7,19 +7,24 @@ import typing
 The part of the pipeline that is the same for the left and right camera
 """
 class MonoPipeline():
-    def __init__(self, pipeline: dai.Pipeline, is_left: bool) -> None:
+    def __init__(self, pipeline: dai.Pipeline, stereo_node: dai.node.StereoDepth, is_left: bool) -> None:
         self.pipeline = pipeline
+        self.stereo_node = stereo_node
         self.is_left = is_left
         self.cam = self.pipeline.create(dai.node.MonoCamera)
         self.socket = dai.CameraBoardSocket.LEFT if self.is_left else dai.CameraBoardSocket.RIGHT
         self.cam.setBoardSocket(self.socket)
         self.img_out = self.pipeline.create(dai.node.XLinkOut)
         self.img_out.setStreamName("img_l" if self.is_left else "img_r")
-        self.cam.out.link(self.img_out.input)
+        if self.is_left:
+            self.cam.out.link(self.stereo_node.left)
+            self.stereo_node.rectifiedLeft.link(self.img_out.input)
+        else:
+            self.cam.out.link(self.stereo_node.right)
+            self.stereo_node.rectifiedRight.link(self.img_out.input)
         self.control_in = pipeline.create(dai.node.XLinkIn)
         self.control_in.out.link(self.cam.inputControl)
         self.control_in.setStreamName("ctrl_l" if self.is_left else "ctrl_r")
-        print
     
     def set_exposure(self, device: dai.Device, exp_time: int, sens_iso: int) ->None:
         msg = dai.CameraControl()
@@ -71,8 +76,9 @@ def DLT(proj_l, proj_r, point_l, point_r) -> np.array:
 
 
 pipeline = dai.Pipeline()
-pipeline_l = MonoPipeline(pipeline, is_left=True)
-pipeline_r = MonoPipeline(pipeline, is_left=False)
+stereo_depth = pipeline.create(dai.node.StereoDepth)
+pipeline_l = MonoPipeline(pipeline, stereo_depth, is_left=True)
+pipeline_r = MonoPipeline(pipeline, stereo_depth, is_left=False)
 
 with dai.Device(pipeline) as device:
     device: dai.Device

@@ -13,11 +13,9 @@ class MonoPipeline():
         self.cam = self.pipeline.create(dai.node.MonoCamera)
         self.socket = dai.CameraBoardSocket.LEFT if self.is_left else dai.CameraBoardSocket.RIGHT
         self.cam.setBoardSocket(self.socket)
-        self.manip= self.pipeline.create(dai.node.ImageManip)
-        self.cam.out.link(self.manip.inputImage)
         self.img_out = self.pipeline.create(dai.node.XLinkOut)
         self.img_out.setStreamName("img_l" if self.is_left else "img_r")
-        self.manip.out.link(self.img_out.input)
+        self.cam.out.link(self.img_out.input)
         self.control_in = pipeline.create(dai.node.XLinkIn)
         self.control_in.out.link(self.cam.inputControl)
         self.control_in.setStreamName("ctrl_l" if self.is_left else "ctrl_r")

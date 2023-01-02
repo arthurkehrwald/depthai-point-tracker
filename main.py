@@ -2,9 +2,11 @@ import depthai as dai
 import cv2
 import numpy as np
 import typing
+import socket
 
 """
 The part of the pipeline that is the same for the left and right camera
+The stereo node is shared, so it must be created before and linked
 """
 class MonoPipeline():
     def __init__(self, pipeline: dai.Pipeline, stereo_node: dai.node.StereoDepth, is_left: bool) -> None:
@@ -65,6 +67,7 @@ class MonoPipeline():
         return P @ extrinsics
 
 def DLT(proj_l, proj_r, point_l, point_r) -> np.array:
+    # cv.triangulatePoints operates on lists of points
     points_l = np.zeros((2, 1))
     points_l[:, 0] = point_l
     points_r = np.zeros((2, 1))
@@ -72,13 +75,16 @@ def DLT(proj_l, proj_r, point_l, point_r) -> np.array:
     points4d : np.ndarray = cv2.triangulatePoints(proj_r, proj_l, points_r, points_l)
     first = points4d[:, 0]
     first = first[:3] / first[3]
-    print(first)
-
+    return first
 
 pipeline = dai.Pipeline()
 stereo_depth = pipeline.create(dai.node.StereoDepth)
 pipeline_l = MonoPipeline(pipeline, stereo_depth, is_left=True)
 pipeline_r = MonoPipeline(pipeline, stereo_depth, is_left=False)
+
+IP = "127.0.0.1"
+PORT = 4242
+sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 with dai.Device(pipeline) as device:
     device: dai.Device
@@ -92,6 +98,8 @@ with dai.Device(pipeline) as device:
         success_l, cX_l, cY_l = pipeline_l.try_get_centroid(device, True)
         success_r, cX_r, cY_r = pipeline_r.try_get_centroid(device, True)
         if success_l and success_r:
-            DLT(p_r, p_l, [cX_r, cY_r], [cX_l, cY_r])
+            tracked_pos : np.array = DLT(p_r, p_l, [cX_r, cY_r], [cX_l, cY_r])
+            tracked_pos_bytes = tracked_pos.tobytes()
+            sock.sendto(tracked_pos_bytes, (IP, PORT))
         if cv2.waitKey(1) == ord('q'):
             break

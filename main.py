@@ -45,7 +45,6 @@ class MonoPipeline():
         ret, thresh = cv2.threshold(img, 127, 255, 0)
         M = cv2.moments(thresh)
         if M["m00"] == 0.0:
-            cv2.imshow("left" if self.is_left else "right", img)
             return False, -1, -1        
         cX = int(M["m10"] / M["m00"])
         cY = int(M["m01"] / M["m00"])
@@ -83,23 +82,25 @@ pipeline_l = MonoPipeline(pipeline, stereo_depth, is_left=True)
 pipeline_r = MonoPipeline(pipeline, stereo_depth, is_left=False)
 
 IP = "127.0.0.1"
-PORT = 4242
+PORT = 4241
 sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 with dai.Device(pipeline) as device:
     device: dai.Device
     # Super low exposure so only LED is visible
-    pipeline_r.set_exposure(device, 1, 100)
-    pipeline_l.set_exposure(device, 1, 100)
+    pipeline_r.set_exposure(device, 500, 300)
+    pipeline_l.set_exposure(device, 500, 300)
     p_l = pipeline_l.get_projection_matrix(device)
     p_r = pipeline_r.get_projection_matrix(device)
 
     while True:
-        success_l, cX_l, cY_l = pipeline_l.try_get_centroid(device, True)
-        success_r, cX_r, cY_r = pipeline_r.try_get_centroid(device, True)
+        success_l, cX_l, cY_l = pipeline_l.try_get_centroid(device, False)
+        success_r, cX_r, cY_r = pipeline_r.try_get_centroid(device, False)
         if success_l and success_r:
             tracked_pos : np.array = DLT(p_r, p_l, [cX_r, cY_r], [cX_l, cY_r])
-            tracked_pos_bytes = tracked_pos.tobytes()
+            tracked_pos_with_empty_rotation : np.array = np.zeros(6)
+            tracked_pos_with_empty_rotation[:3] = tracked_pos
+            tracked_pos_bytes = tracked_pos_with_empty_rotation.tobytes()
             sock.sendto(tracked_pos_bytes, (IP, PORT))
         if cv2.waitKey(1) == ord('q'):
             break

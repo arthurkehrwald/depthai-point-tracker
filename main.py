@@ -73,7 +73,7 @@ def DLT(proj_l, proj_r, point_l, point_r) -> np.array:
     points_r[:, 0] = point_r
     points4d : np.ndarray = cv2.triangulatePoints(proj_r, proj_l, points_r, points_l)
     first = points4d[:, 0]
-    first = first[:3] / first[3]
+    first = first[:3] / first[3] # homogenous -> cartesian
     return first
 
 pipeline = dai.Pipeline()
@@ -94,8 +94,8 @@ with dai.Device(pipeline) as device:
     p_r = pipeline_r.get_projection_matrix(device)
 
     while True:
-        success_l, cX_l, cY_l = pipeline_l.try_get_centroid(device, False)
-        success_r, cX_r, cY_r = pipeline_r.try_get_centroid(device, False)
+        success_l, cX_l, cY_l = pipeline_l.try_get_centroid(device, show_preview=True)
+        success_r, cX_r, cY_r = pipeline_r.try_get_centroid(device, show_preview=True)
         if success_l and success_r:
             tracked_pos : np.array = DLT(p_r, p_l, [cX_r, cY_r], [cX_l, cY_r])
             tracked_pos_with_empty_rotation : np.array = np.zeros(6)

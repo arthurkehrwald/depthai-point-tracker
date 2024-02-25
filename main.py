@@ -41,35 +41,6 @@ class MonoPipeline:
         ctrl_q = device.getInputQueue(name)
         ctrl_q.send(msg)
 
-    def try_get_centroid(
-        self, device: dai.Device, show_preview: bool
-    ) -> typing.Tuple[bool, int, int]:
-        q = device.getOutputQueue(self.img_out.getStreamName())
-        output = q.tryGet()
-        if output is None:
-            return False, -1, -1
-        img = output.getCvFrame()
-        res = img.shape
-        ret, thresh = cv2.threshold(img, 200, 255, 0)
-        M = cv2.moments(thresh)
-        if M["m00"] == 0.0:
-            return False, -1, -1
-        cX = int(M["m10"] / M["m00"])
-        cY = int(M["m01"] / M["m00"])
-        if show_preview:
-            cv2.circle(img, (cX, cY), 5, (255, 0, 0), -1)
-            cv2.putText(
-                img,
-                "centroid",
-                (cX - 25, cY - 25),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 255, 255),
-                2,
-            )
-            cv2.imshow("left" if self.is_left else "right", img)
-        return True, cX, cY
-
     def get_projection_matrix(self, device: dai.Device) -> np.ndarray:
         calibData = device.readCalibration()
         intrinsics = calibData.getCameraIntrinsics(self.socket, 1280, 720)
@@ -83,6 +54,43 @@ class MonoPipeline:
             )
         )
         return P @ extrinsics
+    
+    def get_img_out_name(self) -> str:
+        return self.img_out.getStreamName()
+
+def convert_to_cv_frame(data: dai.ADatatype) -> cv2.typing.MatLike:
+    img_frame = typing.cast(dai.ImgFrame, data)
+    obj = img_frame.getCvFrame()
+    mat_like = typing.cast(cv2.typing.MatLike, obj)
+    return mat_like
+
+def try_get_img(img_q: dai.DataOutputQueue) -> typing.Tuple[bool, cv2.typing.MatLike]:
+    if img_q.has():
+        return True, convert_to_cv_frame(img_q.get())
+    return False, None
+
+def try_get_centroid(
+    img: cv2.typing.MatLike, show_preview: bool, preview_name: str
+) -> typing.Tuple[bool, int, int]:
+    ret, thresh = cv2.threshold(img, 200, 255, 0)
+    M = cv2.moments(thresh)
+    if M["m00"] == 0.0:
+        return False, -1, -1
+    cX = int(M["m10"] / M["m00"])
+    cY = int(M["m01"] / M["m00"])
+    if show_preview:
+        cv2.circle(img, (cX, cY), 5, (255, 0, 0), -1)
+        cv2.putText(
+            img,
+            "centroid",
+            (cX - 25, cY - 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            2,
+        )
+        cv2.imshow(preview_name, img)
+    return True, cX, cY
 
 
 def DLT(proj_l, proj_r, point_l, point_r) -> np.array:
@@ -113,10 +121,15 @@ with dai.Device(pipeline) as device:
     pipeline_l.set_exposure(device, 500, 300)
     p_l = pipeline_l.get_projection_matrix(device)
     p_r = pipeline_r.get_projection_matrix(device)
+    img_q_l = device.getOutputQueue(pipeline_l.get_img_out_name(), 1, False)
+    img_q_r = device.getOutputQueue(pipeline_r.get_img_out_name(), 1, False)
 
     while True:
-        success_l, cX_l, cY_l = pipeline_l.try_get_centroid(device, show_preview=True)
-        success_r, cX_r, cY_r = pipeline_r.try_get_centroid(device, show_preview=True)
+        success_l, img_l = try_get_img(img_q_l)
+        success_r, img_r = try_get_img(img_q_r)
+        if success_l and success_r:
+            success_l, cX_l, cY_l = try_get_centroid(img_l, show_preview=True, preview_name="left")
+            success_r, cX_r, cY_r = try_get_centroid(img_r, show_preview=True, preview_name="right")
         if success_l and success_r:
             tracked_pos: np.array = DLT(p_r, p_l, [cX_r, cY_r], [cX_l, cY_r])
             tracked_pos_with_empty_rotation: np.array = np.zeros(6)

@@ -19,7 +19,7 @@ class MonoPipeline:
         self.is_left = is_left
         self.cam = self.pipeline.create(dai.node.MonoCamera)
         self.socket = (
-            dai.CameraBoardSocket.LEFT if self.is_left else dai.CameraBoardSocket.RIGHT
+            dai.CameraBoardSocket.CAM_B if self.is_left else dai.CameraBoardSocket.CAM_C
         )
         self.cam.setBoardSocket(self.socket)
         self.img_out = self.pipeline.create(dai.node.XLinkOut)
@@ -72,17 +72,14 @@ class MonoPipeline:
 
     def get_projection_matrix(self, device: dai.Device) -> np.ndarray:
         calibData = device.readCalibration()
-        socket = (
-            dai.CameraBoardSocket.LEFT if self.is_left else dai.CameraBoardSocket.RIGHT
-        )
-        intrinsics = calibData.getCameraIntrinsics(socket, 1280, 720)
+        intrinsics = calibData.getCameraIntrinsics(self.socket, 1280, 720)
         P = np.zeros((3, 4))
         P[:3, :3] = intrinsics
         if not self.is_left:
             return P
         extrinsics = np.array(
             calibData.getCameraExtrinsics(
-                dai.CameraBoardSocket.LEFT, dai.CameraBoardSocket.RIGHT
+                dai.CameraBoardSocket.CAM_B, dai.CameraBoardSocket.CAM_C
             )
         )
         return P @ extrinsics

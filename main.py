@@ -50,7 +50,7 @@ class MonoPipeline:
             return False, -1, -1
         img = output.getCvFrame()
         res = img.shape
-        ret, thresh = cv2.threshold(img, 127, 255, 0)
+        ret, thresh = cv2.threshold(img, 200, 255, 0)
         M = cv2.moments(thresh)
         if M["m00"] == 0.0:
             return False, -1, -1

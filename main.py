@@ -121,8 +121,8 @@ sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 with dai.Device(pipeline) as device:
     device = typing.cast(dai.Device, device)
     # Super low exposure so only LED is visible
-    pipeline_r.set_exposure(device, 500, 300)
-    pipeline_l.set_exposure(device, 500, 300)
+    pipeline_r.set_exposure(device, 200, 100)
+    pipeline_l.set_exposure(device, 200, 100)
     p_l = pipeline_l.get_projection_matrix(device)
     p_r = pipeline_r.get_projection_matrix(device)
     img_q_l = device.getOutputQueue(pipeline_l.get_img_out_name(), 1, False)

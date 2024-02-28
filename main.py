@@ -66,7 +66,7 @@ def convert_to_cv_frame(data: dai.ADatatype) -> cv2.typing.MatLike:
     return mat_like
 
 
-def try_get_img(img_q: dai.DataOutputQueue) -> typing.Tuple[bool, cv2.typing.MatLike]:
+def try_get_img(img_q: dai.DataOutputQueue) -> typing.Tuple[bool, cv2.typing.MatLike | None]:
     if img_q.has():
         return True, convert_to_cv_frame(img_q.get())
     return False, None
@@ -97,7 +97,7 @@ def try_get_centroid(
     return True, cX, cY
 
 
-def DLT(proj_l, proj_r, point_l, point_r) -> np.array:
+def DLT(proj_l, proj_r, point_l, point_r) -> np.ndarray:
     # cv.triangulatePoints operates on lists of points
     points_l = np.zeros((2, 1))
     points_l[:, 0] = point_l
@@ -119,7 +119,7 @@ PORT = 4241
 sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 with dai.Device(pipeline) as device:
-    device: dai.Device
+    device = typing.cast(dai.Device, device)
     # Super low exposure so only LED is visible
     pipeline_r.set_exposure(device, 500, 300)
     pipeline_l.set_exposure(device, 500, 300)
@@ -132,7 +132,7 @@ with dai.Device(pipeline) as device:
     while True:
         success_l, img_l = try_get_img(img_q_l)
         success_r, img_r = try_get_img(img_q_r)
-        if success_l and success_r:
+        if success_l and success_r and img_l is not None and img_r is not None:
             success_l, cX_l, cY_l = try_get_centroid(
                 img_l, threshold01=threshold01, show_preview=True, preview_name="left"
             )
@@ -140,9 +140,9 @@ with dai.Device(pipeline) as device:
                 img_r, threshold01=threshold01, show_preview=True, preview_name="right"
             )
         if success_l and success_r:
-            tracked_pos: np.array = DLT(p_r, p_l, [cX_r, cY_r], [cX_l, cY_r])
+            tracked_pos = DLT(p_r, p_l, [cX_r, cY_r], [cX_l, cY_r])
             print(tracked_pos)
-            tracked_pos_with_empty_rotation: np.array = np.zeros(6)
+            tracked_pos_with_empty_rotation = np.zeros(6)
             tracked_pos_with_empty_rotation[:3] = tracked_pos
             tracked_pos_bytes = tracked_pos_with_empty_rotation.tobytes()
             sock.sendto(tracked_pos_bytes, (IP, PORT))

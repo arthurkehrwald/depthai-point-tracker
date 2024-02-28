@@ -54,9 +54,10 @@ class MonoPipeline:
             )
         )
         return P @ extrinsics
-    
+
     def get_img_out_name(self) -> str:
         return self.img_out.getStreamName()
+
 
 def convert_to_cv_frame(data: dai.ADatatype) -> cv2.typing.MatLike:
     img_frame = typing.cast(dai.ImgFrame, data)
@@ -64,15 +65,17 @@ def convert_to_cv_frame(data: dai.ADatatype) -> cv2.typing.MatLike:
     mat_like = typing.cast(cv2.typing.MatLike, obj)
     return mat_like
 
+
 def try_get_img(img_q: dai.DataOutputQueue) -> typing.Tuple[bool, cv2.typing.MatLike]:
     if img_q.has():
         return True, convert_to_cv_frame(img_q.get())
     return False, None
 
+
 def try_get_centroid(
-    img: cv2.typing.MatLike, show_preview: bool, preview_name: str
+    img: cv2.typing.MatLike, threshold01: float, show_preview: bool, preview_name: str
 ) -> typing.Tuple[bool, int, int]:
-    ret, thresh = cv2.threshold(img, 200, 255, 0)
+    ret, thresh = cv2.threshold(img, 254 * threshold01, 255, 0)
     M = cv2.moments(thresh)
     if M["m00"] == 0.0:
         return False, -1, -1
@@ -90,6 +93,7 @@ def try_get_centroid(
             2,
         )
         cv2.imshow(preview_name, img)
+        cv2.imshow(preview_name + " thresh", thresh)
     return True, cX, cY
 
 
@@ -123,18 +127,31 @@ with dai.Device(pipeline) as device:
     p_r = pipeline_r.get_projection_matrix(device)
     img_q_l = device.getOutputQueue(pipeline_l.get_img_out_name(), 1, False)
     img_q_r = device.getOutputQueue(pipeline_r.get_img_out_name(), 1, False)
+    threshold01 = 0.5
 
     while True:
         success_l, img_l = try_get_img(img_q_l)
         success_r, img_r = try_get_img(img_q_r)
         if success_l and success_r:
-            success_l, cX_l, cY_l = try_get_centroid(img_l, show_preview=True, preview_name="left")
-            success_r, cX_r, cY_r = try_get_centroid(img_r, show_preview=True, preview_name="right")
+            success_l, cX_l, cY_l = try_get_centroid(
+                img_l, threshold01=threshold01, show_preview=True, preview_name="left"
+            )
+            success_r, cX_r, cY_r = try_get_centroid(
+                img_r, threshold01=threshold01, show_preview=True, preview_name="right"
+            )
         if success_l and success_r:
             tracked_pos: np.array = DLT(p_r, p_l, [cX_r, cY_r], [cX_l, cY_r])
+            print(tracked_pos)
             tracked_pos_with_empty_rotation: np.array = np.zeros(6)
             tracked_pos_with_empty_rotation[:3] = tracked_pos
             tracked_pos_bytes = tracked_pos_with_empty_rotation.tobytes()
             sock.sendto(tracked_pos_bytes, (IP, PORT))
-        if cv2.waitKey(1) == ord("q"):
+        key = cv2.waitKey(1)
+        if key == ord("+"):
+            threshold01 = min(threshold01 + 0.05, 0.99)
+            print(threshold01)
+        elif key == ord("-"):
+            threshold01 = max(threshold01 - 0.05, 0.0)
+            print(threshold01)
+        elif key == ord("q"):
             break

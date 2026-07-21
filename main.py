@@ -242,15 +242,25 @@ class MainWindow(QtWidgets.QMainWindow):
         # View Options
         controls_layout.addSpacing(20)
         controls_layout.addWidget(QtWidgets.QLabel("<b>View Options</b>"))
+        
+        # Camera selection group
+        self.camera_group = QtWidgets.QButtonGroup(self)
         self.left_cam_radio = QtWidgets.QRadioButton("Left Camera")
         self.right_cam_radio = QtWidgets.QRadioButton("Right Camera")
+        self.camera_group.addButton(self.left_cam_radio)
+        self.camera_group.addButton(self.right_cam_radio)
         self.left_cam_radio.setChecked(True)
         controls_layout.addWidget(self.left_cam_radio)
         controls_layout.addWidget(self.right_cam_radio)
         
         controls_layout.addSpacing(10)
+        
+        # View mode group
+        self.view_mode_group = QtWidgets.QButtonGroup(self)
         self.unchanged_radio = QtWidgets.QRadioButton("Unchanged")
         self.thresholded_radio = QtWidgets.QRadioButton("Thresholded")
+        self.view_mode_group.addButton(self.unchanged_radio)
+        self.view_mode_group.addButton(self.thresholded_radio)
         self.unchanged_radio.setChecked(True)
         controls_layout.addWidget(self.unchanged_radio)
         controls_layout.addWidget(self.thresholded_radio)

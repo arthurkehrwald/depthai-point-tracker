@@ -29,10 +29,9 @@ def save_config(config):
 
 class MonoPipeline:
     def __init__(
-            self, pipeline: dai.Pipeline, stereo_node: dai.node.StereoDepth, is_left: bool
+            self, pipeline: dai.Pipeline, is_left: bool
     ) -> None:
         self.pipeline = pipeline
-        self.stereo_node = stereo_node
         self.is_left = is_left
         self.socket = (
             dai.CameraBoardSocket.CAM_B if self.is_left else dai.CameraBoardSocket.CAM_C
@@ -40,16 +39,8 @@ class MonoPipeline:
         self.cam = self.pipeline.create(dai.node.Camera).build(self.socket)
 
         # Request mono output
-        self.mono_out = self.cam.requestOutput((1280, 720), type=dai.ImgFrame.Type.GRAY8)
-
-        if self.is_left:
-            self.mono_out.link(self.stereo_node.left)
-            self.rect_out = self.stereo_node.rectifiedLeft
-        else:
-            self.mono_out.link(self.stereo_node.right)
-            self.rect_out = self.stereo_node.rectifiedRight
-
-        self.img_q = self.rect_out.createOutputQueue(maxSize=1, blocking=False)
+        self.mono_out = self.cam.requestOutput(self.resolution)
+        self.img_q = self.mono_out.createOutputQueue(maxSize=1, blocking=False)
         self.control_in = self.cam.inputControl
         self.ctrl_q = self.control_in.createInputQueue()
 
@@ -123,9 +114,8 @@ class Worker(QtCore.QThread):
 
     def run(self):
         with dai.Pipeline() as pipeline:
-            stereo_depth = pipeline.create(dai.node.StereoDepth)
-            pipeline_l = MonoPipeline(pipeline, stereo_depth, is_left=True)
-            pipeline_r = MonoPipeline(pipeline, stereo_depth, is_left=False)
+            pipeline_l = MonoPipeline(pipeline, is_left=True)
+            pipeline_r = MonoPipeline(pipeline, is_left=False)
 
             IP = "127.0.0.1"
             PORT = 4241

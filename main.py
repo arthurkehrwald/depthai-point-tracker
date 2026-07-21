@@ -37,6 +37,16 @@ class MonoPipeline:
             dai.CameraBoardSocket.CAM_B if self.is_left else dai.CameraBoardSocket.CAM_C
         )
         self.cam = self.pipeline.create(dai.node.Camera).build(self.socket)
+        self.resolution = (1280, 720)
+        self.calib_data = self.pipeline.getDefaultDevice().readCalibration()
+
+        # Rectification parameters
+        intrinsics = np.array(self.calib_data.getCameraIntrinsics(self.socket, self.resolution[0], self.resolution[1]))
+        intrinsics_r = np.array(
+            self.calib_data.getCameraIntrinsics(dai.CameraBoardSocket.CAM_C, self.resolution[0], self.resolution[1]))
+        rotation = np.array(
+            self.calib_data.getStereoLeftRectificationRotation() if self.is_left else self.calib_data.getStereoRightRectificationRotation())
+        self.rectification = intrinsics_r @ rotation @ np.linalg.inv(intrinsics)
 
         # Request mono output
         self.mono_out = self.cam.requestOutput(self.resolution)
@@ -68,7 +78,10 @@ class MonoPipeline:
         if self.img_q.has():
             img = self.img_q.get()
             if isinstance(img, dai.ImgFrame):
-                return True, img.getCvFrame()
+                img = img.getCvFrame()
+                rectified = cv2.warpPerspective(img, self.rectification, img.shape[::-1],
+                                                cv2.INTER_CUBIC + cv2.WARP_FILL_OUTLIERS + cv2.WARP_INVERSE_MAP)
+                return True, rectified
         return False, None
 
 def try_get_centroid(
@@ -307,7 +320,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.data_z = []
         self.max_points = 100
         visuals_layout.addWidget(self.plot_widget)
-        
+
         # Connect signals
         self.exp_slider.valueChanged.connect(self.exp_spin.setValue)
         self.exp_spin.valueChanged.connect(self.update_exposure)
@@ -315,12 +328,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.iso_spin.valueChanged.connect(self.update_iso)
         self.thresh_slider.valueChanged.connect(lambda v: self.thresh_spin.setValue(v / 100.0))
         self.thresh_spin.valueChanged.connect(self.update_threshold)
-        
+
         self.left_cam_radio.toggled.connect(self.update_view_selection)
         self.right_cam_radio.toggled.connect(self.update_view_selection)
         self.unchanged_radio.toggled.connect(self.update_view_selection)
         self.thresholded_radio.toggled.connect(self.update_view_selection)
-        
+
         # Worker thread
         self.worker = Worker(self.config)
         self.worker.frame_ready.connect(self.on_frame)
@@ -395,6 +408,7 @@ class MainWindow(QtWidgets.QMainWindow):
             'threshold': self.worker.threshold
         })
         event.accept()
+
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)

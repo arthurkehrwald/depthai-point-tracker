@@ -4,6 +4,8 @@ import numpy as np
 import typing
 import socket
 
+from depthai import MessageQueue
+
 """
 The part of the pipeline that is the same for the left and right camera
 The stereo node is shared, so it must be created before and linked
@@ -17,46 +19,48 @@ class MonoPipeline:
         self.pipeline = pipeline
         self.stereo_node = stereo_node
         self.is_left = is_left
-        self.cam = self.pipeline.create(dai.node.MonoCamera)
         self.socket = (
             dai.CameraBoardSocket.CAM_B if self.is_left else dai.CameraBoardSocket.CAM_C
         )
-        self.cam.setBoardSocket(self.socket)
-        self.img_out = self.pipeline.create(dai.node.XLinkOut)
-        self.img_out.setStreamName("img_l" if self.is_left else "img_r")
-        if self.is_left:
-            self.cam.out.link(self.stereo_node.left)
-            self.stereo_node.rectifiedLeft.link(self.img_out.input)
-        else:
-            self.cam.out.link(self.stereo_node.right)
-            self.stereo_node.rectifiedRight.link(self.img_out.input)
-        self.control_in = pipeline.create(dai.node.XLinkIn)
-        self.control_in.out.link(self.cam.inputControl)
-        self.control_in.setStreamName("ctrl_l" if self.is_left else "ctrl_r")
+        self.cam = self.pipeline.create(dai.node.Camera).build(self.socket)
 
-    def set_exposure(self, device: dai.Device, exp_time: int, sens_iso: int) -> None:
+        # Request mono output
+        self.mono_out = self.cam.requestOutput((1280, 720), type=dai.ImgFrame.Type.GRAY8)
+
+        if self.is_left:
+            self.mono_out.link(self.stereo_node.left)
+            self.rect_out = self.stereo_node.rectifiedLeft
+        else:
+            self.mono_out.link(self.stereo_node.right)
+            self.rect_out = self.stereo_node.rectifiedRight
+
+        self.img_q = self.rect_out.createOutputQueue(maxSize=1, blocking=False)
+        self.control_in = self.cam.inputControl
+        self.ctrl_q = self.control_in.createInputQueue()
+
+    def set_exposure(self, exp_time: int, sens_iso: int) -> None:
         msg = dai.CameraControl()
         msg.setManualExposure(exp_time, sens_iso)
-        name = self.control_in.getStreamName()
-        ctrl_q = device.getInputQueue(name)
-        ctrl_q.send(msg)
+        self.ctrl_q.send(msg)
 
-    def get_projection_matrix(self, device: dai.Device) -> np.ndarray:
-        calibData = device.readCalibration()
-        intrinsics = calibData.getCameraIntrinsics(self.socket, 1280, 720)
+    def get_projection_matrix(self) -> np.ndarray:
+        device = self.pipeline.getDefaultDevice()
+        calib_data = device.readCalibration()
+        intrinsics = calib_data.getCameraIntrinsics(self.socket, 1280, 720)
         P = np.zeros((3, 4))
         P[:3, :3] = intrinsics
         if not self.is_left:
             return P
         extrinsics = np.array(
-            calibData.getCameraExtrinsics(
+            calib_data.getCameraExtrinsics(
                 dai.CameraBoardSocket.CAM_B, dai.CameraBoardSocket.CAM_C
             )
         )
         return P @ extrinsics
 
     def get_img_out_name(self) -> str:
-        return self.img_out.getStreamName()
+        # get_img_out_name is no longer needed but kept for compatibility if needed
+        return "img_l" if self.is_left else "img_r"
 
 
 def convert_to_cv_frame(data: dai.ADatatype) -> cv2.typing.MatLike:
@@ -67,7 +71,7 @@ def convert_to_cv_frame(data: dai.ADatatype) -> cv2.typing.MatLike:
 
 
 def try_get_img(
-    img_q: dai.DataOutputQueue,
+    img_q: MessageQueue,
 ) -> typing.Tuple[bool, cv2.typing.MatLike | None]:
     if img_q.has():
         return True, convert_to_cv_frame(img_q.get())
@@ -115,50 +119,47 @@ def DLT(
     first = first[:3] / first[3]  # homogenous -> cartesian
     return first
 
+with dai.Pipeline() as pipeline:
+    stereo_depth = pipeline.create(dai.node.StereoDepth)
+    pipeline_l = MonoPipeline(pipeline, stereo_depth, is_left=True)
+    pipeline_r = MonoPipeline(pipeline, stereo_depth, is_left=False)
 
-pipeline = dai.Pipeline()
-stereo_depth = pipeline.create(dai.node.StereoDepth)
-pipeline_l = MonoPipeline(pipeline, stereo_depth, is_left=True)
-pipeline_r = MonoPipeline(pipeline, stereo_depth, is_left=False)
+    IP = "127.0.0.1"
+    PORT = 4241
+    sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-IP = "127.0.0.1"
-PORT = 4241
-sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-with dai.Device(pipeline) as device:
-    device = typing.cast(dai.Device, device)
+    pipeline.start()
     # Super low exposure so only LED is visible
-    pipeline_r.set_exposure(device, 200, 100)
-    pipeline_l.set_exposure(device, 200, 100)
-    p_l = pipeline_l.get_projection_matrix(device)
-    p_r = pipeline_r.get_projection_matrix(device)
-    img_q_l = device.getOutputQueue(pipeline_l.get_img_out_name(), 1, False)
-    img_q_r = device.getOutputQueue(pipeline_r.get_img_out_name(), 1, False)
+    pipeline_r.set_exposure(200, 100)
+    pipeline_l.set_exposure(200, 100)
+    p_l = pipeline_l.get_projection_matrix()
+    p_r = pipeline_r.get_projection_matrix()
     threshold01 = 0.5
 
-    while True:
-        success_l, img_l = try_get_img(img_q_l)
-        success_r, img_r = try_get_img(img_q_r)
-        if success_l and success_r and img_l is not None and img_r is not None:
-            success_l, cX_l, cY_l = try_get_centroid(
-                img_l, threshold01=threshold01, show_preview=True, preview_name="left"
-            )
-            success_r, cX_r, cY_r = try_get_centroid(
-                img_r, threshold01=threshold01, show_preview=True, preview_name="right"
-            )
-            if success_l and success_r:
-                tracked_pos = DLT(p_r, p_l, (cX_r, cY_r), (cX_l, cY_r))
-                print(tracked_pos)
-                tracked_pos_with_empty_rotation = np.zeros(6)
-                tracked_pos_with_empty_rotation[:3] = tracked_pos
-                tracked_pos_bytes = tracked_pos_with_empty_rotation.tobytes()
-                sock.sendto(tracked_pos_bytes, (IP, PORT))
-        key = cv2.waitKey(1)
-        if key == ord("+"):
-            threshold01 = min(threshold01 + 0.05, 0.99)
-            print(threshold01)
-        elif key == ord("-"):
-            threshold01 = max(threshold01 - 0.05, 0.0)
-            print(threshold01)
-        elif key == ord("q"):
-            break
+    with pipeline:
+        while pipeline.isRunning():
+            success_l, img_l = try_get_img(pipeline_l.img_q)
+            success_r, img_r = try_get_img(pipeline_r.img_q)
+            if success_l and success_r and img_l is not None and img_r is not None:
+                success_l, cX_l, cY_l = try_get_centroid(
+                    img_l, threshold01=threshold01, show_preview=True, preview_name="left"
+                )
+                success_r, cX_r, cY_r = try_get_centroid(
+                    img_r, threshold01=threshold01, show_preview=True, preview_name="right"
+                )
+                if success_l and success_r:
+                    tracked_pos = DLT(p_r, p_l, (cX_r, cY_r), (cX_l, cY_r))
+                    print(tracked_pos)
+                    tracked_pos_with_empty_rotation = np.zeros(6)
+                    tracked_pos_with_empty_rotation[:3] = tracked_pos
+                    tracked_pos_bytes = tracked_pos_with_empty_rotation.tobytes()
+                    sock.sendto(tracked_pos_bytes, (IP, PORT))
+            key = cv2.waitKey(1)
+            if key == ord("+"):
+                threshold01 = min(threshold01 + 0.05, 0.99)
+                print(threshold01)
+            elif key == ord("-"):
+                threshold01 = max(threshold01 - 0.05, 0.0)
+                print(threshold01)
+            elif key == ord("q"):
+                break

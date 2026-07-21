@@ -1,0 +1,11 @@
+[project]
+name = "depthai-point-tracker"
+version = "0.1.0"
+description = "Tracks a single IR LED in 3D using a Luxonis Oak-D stereo camera."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "depthai>=3.8.0",
+    "numpy>=2.5.1",
+    "opencv-python>=5.0.0.93",
+]

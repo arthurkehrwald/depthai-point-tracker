@@ -283,6 +283,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Image Preview
         self.image_view = pg.GraphicsLayoutWidget()
+        self.image_view.setBackground('gray')
         self.image_view.setMinimumSize(600, 400)
         self.vb = self.image_view.addViewBox()
         self.vb.setAspectLocked(True)

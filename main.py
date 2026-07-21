@@ -58,24 +58,12 @@ class MonoPipeline:
         )
         return P @ extrinsics
 
-    def get_img_out_name(self) -> str:
-        # get_img_out_name is no longer needed but kept for compatibility if needed
-        return "img_l" if self.is_left else "img_r"
-
-
-def convert_to_cv_frame(data: dai.ADatatype) -> cv2.typing.MatLike:
-    img_frame = typing.cast(dai.ImgFrame, data)
-    obj = img_frame.getCvFrame()
-    mat_like = typing.cast(cv2.typing.MatLike, obj)
-    return mat_like
-
-
-def try_get_img(
-    img_q: MessageQueue,
-) -> typing.Tuple[bool, cv2.typing.MatLike | None]:
-    if img_q.has():
-        return True, convert_to_cv_frame(img_q.get())
-    return False, None
+    def try_get_img(self) -> typing.Tuple[bool, cv2.typing.MatLike | None]:
+        if self.img_q.has():
+            img = self.img_q.get()
+            if isinstance(img, dai.ImgFrame):
+                return True, img.getCvFrame()
+        return False, None
 
 
 def try_get_centroid(
@@ -138,8 +126,8 @@ with dai.Pipeline() as pipeline:
 
     with pipeline:
         while pipeline.isRunning():
-            success_l, img_l = try_get_img(pipeline_l.img_q)
-            success_r, img_r = try_get_img(pipeline_r.img_q)
+            success_l, img_l = pipeline_l.try_get_img()
+            success_r, img_r = pipeline_r.try_get_img()
             if success_l and success_r and img_l is not None and img_r is not None:
                 success_l, cX_l, cY_l = try_get_centroid(
                     img_l, threshold01=threshold01, show_preview=True, preview_name="left"

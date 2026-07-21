@@ -276,9 +276,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # Right Panel: Visuals
         visuals_layout = QtWidgets.QVBoxLayout()
         main_layout.addLayout(visuals_layout)
-        
+        top_visuals = QtWidgets.QHBoxLayout()
+
+        # Top Visuals: Image Preview and 3D
+        visuals_layout.addLayout(top_visuals, stretch=1)
+
         # Image Preview
         self.image_view = pg.GraphicsLayoutWidget()
+        self.image_view.setMinimumSize(600, 400)
         self.vb = self.image_view.addViewBox()
         self.vb.setAspectLocked(True)
         self.img_item = pg.ImageItem()
@@ -289,21 +294,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vb.addItem(self.crosshair_h)
         self.crosshair_v.hide()
         self.crosshair_h.hide()
-        visuals_layout.addWidget(self.image_view, stretch=2)
-        
-        # Bottom Visuals: 3D and Plot
-        bottom_visuals = QtWidgets.QHBoxLayout()
-        visuals_layout.addLayout(bottom_visuals, stretch=1)
-        
+        top_visuals.addWidget(self.image_view, stretch=5)
+
         # 3D View
         self.gl_view = gl.GLViewWidget()
-        self.gl_view.addItem(gl.GLGridItem())
+        self.gl_view.setMinimumSize(400, 300)
+        grid = gl.GLGridItem(size=QtGui.QVector3D(100,100,1))
+        grid.setSpacing(10, 10, 10,)
+        self.gl_view.addItem(grid)
         self.pos_marker = gl.GLScatterPlotItem(pos=np.array([[0,0,0]]), color=(1,0,0,1), size=10)
         self.gl_view.addItem(self.pos_marker)
-        bottom_visuals.addWidget(self.gl_view)
-        
+        top_visuals.addWidget(self.gl_view, stretch=3)
+
         # Plot
         self.plot_widget = pg.PlotWidget(title="XYZ over Time")
+        self.plot_widget.setMinimumSize(400, 300)
         self.plot_widget.addLegend()
         self.curve_x = self.plot_widget.plot(pen='r', name='X')
         self.curve_y = self.plot_widget.plot(pen='g', name='Y')
@@ -312,7 +317,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.data_y = []
         self.data_z = []
         self.max_points = 100
-        bottom_visuals.addWidget(self.plot_widget)
+        visuals_layout.addWidget(self.plot_widget)
         
         # Connect signals
         self.exp_slider.valueChanged.connect(self.exp_spin.setValue)
@@ -381,7 +386,7 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(np.ndarray)
     def on_position(self, pos):
         self.pos_label.setText(f"XYZ: {pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}")
-        self.pos_marker.setData(pos=np.array([pos]))
+        self.pos_marker.setData(pos=np.array([[pos[0], pos[2], pos[1]]]))
         self.data_x.append(pos[0])
         self.data_y.append(pos[1])
         self.data_z.append(pos[2])

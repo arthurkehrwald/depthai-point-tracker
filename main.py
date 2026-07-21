@@ -159,6 +159,9 @@ class Worker(QtCore.QThread):
                             _, img_to_show = cv2.threshold(img_to_show, int(254 * self.threshold), 255, 0)
                         
                         self.frame_ready.emit(img_to_show.copy())
+                        img_height = np.shape(img_to_show)[0]
+                        cY_to_show -= img_height
+                        cY_to_show *= -1
                         self.centroid_ready.emit(cX_to_show, cY_to_show, found_to_show)
                         
                         if s_l and s_r:
@@ -347,8 +350,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.show_thresholded = self.thresholded_radio.isChecked()
 
     @QtCore.Slot(np.ndarray)
-    def on_frame(self, frame):
-        self.img_item.setImage(frame.T)
+    def on_frame(self, frame: cv2.typing.MatLike):
+        rotated_frame = cv2.rotate(frame, cv2.ROTATE_180)
+        mirrored = cv2.flip(rotated_frame, 1)
+        self.img_item.setImage(mirrored.T)
 
     @QtCore.Slot(float, float, bool)
     def on_centroid(self, x, y, found):

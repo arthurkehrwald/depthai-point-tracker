@@ -135,44 +135,42 @@ class Worker(QtCore.QThread):
             
             p_l = pipeline_l.get_projection_matrix()
             p_r = pipeline_r.get_projection_matrix()
+            while self.running and pipeline.isRunning():
+                if self.settings_changed:
+                    pipeline_l.set_exposure(self.exposure, self.iso)
+                    pipeline_r.set_exposure(self.exposure, self.iso)
+                    self.settings_changed = False
 
-            with pipeline:
-                while self.running and pipeline.isRunning():
-                    if self.settings_changed:
-                        pipeline_l.set_exposure(self.exposure, self.iso)
-                        pipeline_r.set_exposure(self.exposure, self.iso)
-                        self.settings_changed = False
-                    
-                    success_l, img_l = pipeline_l.try_get_img()
-                    success_r, img_r = pipeline_r.try_get_img()
-                    
-                    if success_l and success_r and img_l is not None and img_r is not None:
-                        s_l, cX_l, cY_l = try_get_centroid(img_l, self.threshold)
-                        s_r, cX_r, cY_r = try_get_centroid(img_r, self.threshold)
-                        
-                        img_to_show = img_l if self.view_left else img_r
-                        found_to_show = s_l if self.view_left else s_r
-                        cX_to_show = cX_l if self.view_left else cX_r
-                        cY_to_show = cY_l if self.view_left else cY_r
-                        
-                        if self.show_thresholded:
-                            _, img_to_show = cv2.threshold(img_to_show, int(254 * self.threshold), 255, 0)
-                        
-                        self.frame_ready.emit(img_to_show.copy())
-                        img_height = np.shape(img_to_show)[0]
-                        cY_to_show -= img_height
-                        cY_to_show *= -1
-                        self.centroid_ready.emit(cX_to_show, cY_to_show, found_to_show)
-                        
-                        if s_l and s_r:
-                            tracked_pos = DLT(p_r, p_l, (cX_r, cY_r), (cX_l, cY_r))
-                            self.position_ready.emit(tracked_pos)
-                            
-                            tracked_pos_with_empty_rotation = np.zeros(6)
-                            tracked_pos_with_empty_rotation[:3] = tracked_pos
-                            sock.sendto(tracked_pos_with_empty_rotation.tobytes(), (IP, PORT))
-                    
-                    time.sleep(0.001)
+                success_l, img_l = pipeline_l.try_get_img()
+                success_r, img_r = pipeline_r.try_get_img()
+
+                if success_l and success_r and img_l is not None and img_r is not None:
+                    s_l, cX_l, cY_l = try_get_centroid(img_l, self.threshold)
+                    s_r, cX_r, cY_r = try_get_centroid(img_r, self.threshold)
+
+                    img_to_show = img_l if self.view_left else img_r
+                    found_to_show = s_l if self.view_left else s_r
+                    cX_to_show = cX_l if self.view_left else cX_r
+                    cY_to_show = cY_l if self.view_left else cY_r
+
+                    if self.show_thresholded:
+                        _, img_to_show = cv2.threshold(img_to_show, int(254 * self.threshold), 255, 0)
+
+                    self.frame_ready.emit(img_to_show.copy())
+                    img_height = np.shape(img_to_show)[0]
+                    cY_to_show -= img_height
+                    cY_to_show *= -1
+                    self.centroid_ready.emit(cX_to_show, cY_to_show, found_to_show)
+
+                    if s_l and s_r:
+                        tracked_pos = DLT(p_r, p_l, (cX_r, cY_r), (cX_l, cY_r))
+                        self.position_ready.emit(tracked_pos)
+
+                        tracked_pos_with_empty_rotation = np.zeros(6)
+                        tracked_pos_with_empty_rotation[:3] = tracked_pos
+                        sock.sendto(tracked_pos_with_empty_rotation.tobytes(), (IP, PORT))
+
+                time.sleep(0.001)
 
     def stop(self):
         self.running = False

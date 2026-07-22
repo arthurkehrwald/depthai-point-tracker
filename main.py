@@ -14,6 +14,7 @@ import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 
 CONFIG_FILE = "config.json"
+CAMERA_RESOLUTION = (1280, 720)
 
 def load_config():
     if Path(CONFIG_FILE).exists():
@@ -165,19 +166,16 @@ def DLT(
     return first
 
 class Worker(QtCore.QThread):
-    frame_ready = QtCore.Signal(np.ndarray)
-    centroid_ready = QtCore.Signal(float, float, bool)
+    frame_ready = QtCore.Signal(np.ndarray, np.ndarray)
+    centroid_ready = QtCore.Signal(float, float, bool, float, float, bool)
     position_ready = QtCore.Signal(np.ndarray)
 
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.running = True
-        self.view_left = True
-        self.show_thresholded = False
         self.exposure = int(config.get('exposure', 200))
         self.iso = int(config.get('iso', 100))
-        self.threshold = float(config.get('threshold', 0.9))
         self.blob_params = {
             "blob_min_threshold": config.get("blob_min_threshold", 80),
             "blob_max_threshold": config.get("blob_max_threshold", 255),
@@ -192,7 +190,7 @@ class Worker(QtCore.QThread):
 
     def run(self):
         with dai.Pipeline() as pipeline:
-            resolution = (1280, 720)
+            resolution = CAMERA_RESOLUTION
             calibration = pipeline.getDefaultDevice().readCalibration()
             cam_params_l, cam_params_r = rectify(calibration, resolution)
             pipeline_l = MonoPipeline(pipeline, resolution, cam_params_l, is_left=True)
@@ -222,19 +220,13 @@ class Worker(QtCore.QThread):
                     s_l, cX_l, cY_l = blob_detector.detect(img_l)
                     s_r, cX_r, cY_r = blob_detector.detect(img_r)
 
-                    img_to_show = img_l if self.view_left else img_r
-                    found_to_show = s_l if self.view_left else s_r
-                    cX_to_show = cX_l if self.view_left else cX_r
-                    cY_to_show = cY_l if self.view_left else cY_r
+                    self.frame_ready.emit(img_l.copy(), img_r.copy())
 
-                    if self.show_thresholded:
-                        _, img_to_show = cv2.threshold(img_to_show, int(254 * self.threshold), 255, 0)
+                    img_height = np.shape(img_l)[0]
+                    disp_cY_l = (cY_l - img_height) * -1
+                    disp_cY_r = (cY_r - img_height) * -1
 
-                    self.frame_ready.emit(img_to_show.copy())
-                    img_height = np.shape(img_to_show)[0]
-                    cY_to_show -= img_height
-                    cY_to_show *= -1
-                    self.centroid_ready.emit(cX_to_show, cY_to_show, found_to_show)
+                    self.centroid_ready.emit(cX_l, disp_cY_l, s_l, cX_r, disp_cY_r, s_r)
 
                     if s_l and s_r:
                         tracked_pos = DLT(cam_params_l.projection, cam_params_r.projection, (cX_l, cY_l), (cX_r, cY_r))
@@ -296,20 +288,6 @@ class MainWindow(QtWidgets.QMainWindow):
         iso_h.addWidget(self.iso_slider)
         iso_h.addWidget(self.iso_spin)
         controls_layout.addLayout(iso_h)
-
-        # Threshold
-        controls_layout.addWidget(QtWidgets.QLabel("Threshold (0.0 - 1.0):"))
-        self.thresh_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.thresh_slider.setRange(0, 100)
-        self.thresh_slider.setValue(int(self.config['threshold'] * 100))
-        self.thresh_spin = QtWidgets.QDoubleSpinBox()
-        self.thresh_spin.setRange(0.0, 1.0)
-        self.thresh_spin.setSingleStep(0.01)
-        self.thresh_spin.setValue(self.config['threshold'])
-        thresh_h = QtWidgets.QHBoxLayout()
-        thresh_h.addWidget(self.thresh_slider)
-        thresh_h.addWidget(self.thresh_spin)
-        controls_layout.addLayout(thresh_h)
 
         # Blob Detector Settings
         controls_layout.addSpacing(20)
@@ -383,32 +361,6 @@ class MainWindow(QtWidgets.QMainWindow):
         blob_inert_h.addWidget(self.blob_inert_spin)
         controls_layout.addLayout(blob_inert_h)
 
-        # View Options
-        controls_layout.addSpacing(20)
-        controls_layout.addWidget(QtWidgets.QLabel("<b>View Options</b>"))
-
-        # Camera selection group
-        self.camera_group = QtWidgets.QButtonGroup(self)
-        self.left_cam_radio = QtWidgets.QRadioButton("Left Camera")
-        self.right_cam_radio = QtWidgets.QRadioButton("Right Camera")
-        self.camera_group.addButton(self.left_cam_radio)
-        self.camera_group.addButton(self.right_cam_radio)
-        self.left_cam_radio.setChecked(True)
-        controls_layout.addWidget(self.left_cam_radio)
-        controls_layout.addWidget(self.right_cam_radio)
-
-        controls_layout.addSpacing(10)
-
-        # View mode group
-        self.view_mode_group = QtWidgets.QButtonGroup(self)
-        self.unchanged_radio = QtWidgets.QRadioButton("Unchanged")
-        self.thresholded_radio = QtWidgets.QRadioButton("Thresholded")
-        self.view_mode_group.addButton(self.unchanged_radio)
-        self.view_mode_group.addButton(self.thresholded_radio)
-        self.unchanged_radio.setChecked(True)
-        controls_layout.addWidget(self.unchanged_radio)
-        controls_layout.addWidget(self.thresholded_radio)
-
         # Info
         controls_layout.addStretch()
         controls_layout.addWidget(QtWidgets.QLabel("<b>Tracking Info</b>"))
@@ -425,21 +377,50 @@ class MainWindow(QtWidgets.QMainWindow):
         # Top Visuals: Image Preview and 3D
         visuals_layout.addLayout(top_visuals, stretch=1)
 
-        # Image Preview
-        self.image_view = pg.GraphicsLayoutWidget()
-        self.image_view.setBackground('gray')
-        self.image_view.setMinimumSize(600, 400)
-        self.vb = self.image_view.addViewBox()
-        self.vb.setAspectLocked(True)
-        self.img_item = pg.ImageItem()
-        self.vb.addItem(self.img_item)
-        self.crosshair_v = pg.InfiniteLine(angle=90, movable=False, pen='r')
-        self.crosshair_h = pg.InfiniteLine(angle=0, movable=False, pen='r')
-        self.vb.addItem(self.crosshair_v)
-        self.vb.addItem(self.crosshair_h)
-        self.crosshair_v.hide()
-        self.crosshair_h.hide()
-        top_visuals.addWidget(self.image_view, stretch=5)
+        # Image Previews
+        self.image_view_l = pg.GraphicsLayoutWidget()
+        self.image_view_l.setBackground('gray')
+        self.image_view_l.setMinimumSize(300, 400)
+        self.image_view_l.addLabel("<span style='color: #00FF00; font-weight: bold;'>Left Camera</span>", row=0, col=0)
+        self.vb_l = self.image_view_l.addViewBox(row=1, col=0)
+        self.vb_l.setAspectLocked(True)
+        self.img_item_l = pg.ImageItem()
+        self.vb_l.addItem(self.img_item_l)
+        self.crosshair_v_l = pg.InfiniteLine(angle=90, movable=False, pen='r')
+        self.crosshair_h_l = pg.InfiniteLine(angle=0, movable=False, pen='r')
+        self.vb_l.addItem(self.crosshair_v_l)
+        self.vb_l.addItem(self.crosshair_h_l)
+        self.crosshair_v_l.hide()
+        self.crosshair_h_l.hide()
+
+        self.image_view_r = pg.GraphicsLayoutWidget()
+        self.image_view_r.setBackground('gray')
+        self.image_view_r.setMinimumSize(300, 400)
+        self.image_view_r.addLabel("<span style='color: #00FF00; font-weight: bold;'>Right Camera</span>", row=0, col=0)
+        self.vb_r = self.image_view_r.addViewBox(row=1, col=0)
+        self.vb_r.setAspectLocked(True)
+        self.img_item_r = pg.ImageItem()
+        self.vb_r.addItem(self.img_item_r)
+        self.crosshair_v_r = pg.InfiniteLine(angle=90, movable=False, pen='r')
+        self.crosshair_h_r = pg.InfiniteLine(angle=0, movable=False, pen='r')
+        self.vb_r.addItem(self.crosshair_v_r)
+        self.vb_r.addItem(self.crosshair_h_r)
+        self.crosshair_v_r.hide()
+        self.crosshair_h_r.hide()
+
+        # Pre-fill both ImageItems with a blank frame of identical size so the
+        # left and right previews have the same shape/aspect ratio right from
+        # startup (before any real frame has been received from the worker),
+        # and lock their views together so they always stay in sync.
+        blank_w, blank_h = CAMERA_RESOLUTION
+        blank_frame = np.zeros((blank_w, blank_h), dtype=np.uint8)
+        self.img_item_l.setImage(blank_frame)
+        self.img_item_r.setImage(blank_frame)
+        self.vb_r.setXLink(self.vb_l)
+        self.vb_r.setYLink(self.vb_l)
+
+        top_visuals.addWidget(self.image_view_l, stretch=5)
+        top_visuals.addWidget(self.image_view_r, stretch=5)
 
         # 3D View
         self.gl_view = gl.GLViewWidget()
@@ -449,7 +430,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.gl_view.addItem(grid)
         self.pos_marker = gl.GLScatterPlotItem(pos=np.array([[0,0,0]]), color=(1,0,0,1), size=10)
         self.gl_view.addItem(self.pos_marker)
-        top_visuals.addWidget(self.gl_view, stretch=3)
+        top_visuals.addWidget(self.gl_view, stretch=6)
 
         # Plot
         self.plot_widget = pg.PlotWidget(title="XYZ over Time")
@@ -469,8 +450,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.exp_spin.valueChanged.connect(self.update_exposure)
         self.iso_slider.valueChanged.connect(self.iso_spin.setValue)
         self.iso_spin.valueChanged.connect(self.update_iso)
-        self.thresh_slider.valueChanged.connect(lambda v: self.thresh_spin.setValue(v / 100.0))
-        self.thresh_spin.valueChanged.connect(self.update_threshold)
 
         self.blob_min_thresh_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_threshold", v))
         self.blob_max_thresh_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_max_threshold", v))
@@ -482,11 +461,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.blob_conv_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_convexity", v))
         self.blob_inert_slider.valueChanged.connect(lambda v: self.blob_inert_spin.setValue(v / 100.0))
         self.blob_inert_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_inertia", v))
-
-        self.left_cam_radio.toggled.connect(self.update_view_selection)
-        self.right_cam_radio.toggled.connect(self.update_view_selection)
-        self.unchanged_radio.toggled.connect(self.update_view_selection)
-        self.thresholded_radio.toggled.connect(self.update_view_selection)
 
         # Worker thread
         self.worker = Worker(self.config)
@@ -509,13 +483,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.iso_slider.setValue(val)
         self.iso_slider.blockSignals(False)
 
-    def update_threshold(self, val):
-        self.worker.threshold = val
-        self.worker.settings_changed = True
-        self.thresh_slider.blockSignals(True)
-        self.thresh_slider.setValue(int(val * 100))
-        self.thresh_slider.blockSignals(False)
-
     def update_blob_param(self, name, val):
         self.worker.blob_params[name] = val
         self.worker.blob_settings_changed = True
@@ -532,28 +499,38 @@ class MainWindow(QtWidgets.QMainWindow):
             self.blob_inert_slider.setValue(int(val * 100))
             self.blob_inert_slider.blockSignals(False)
 
-    def update_view_selection(self):
-        self.worker.view_left = self.left_cam_radio.isChecked()
-        self.worker.show_thresholded = self.thresholded_radio.isChecked()
+    @QtCore.Slot(np.ndarray, np.ndarray)
+    def on_frame(self, frame_l: np.ndarray, frame_r: np.ndarray):
+        for frame, img_item in [(frame_l, self.img_item_l), (frame_r, self.img_item_r)]:
+            rotated_frame = cv2.rotate(frame, cv2.ROTATE_180)
+            mirrored = cv2.flip(rotated_frame, 1)
+            img_item.setImage(mirrored.T)
 
-    @QtCore.Slot(np.ndarray)
-    def on_frame(self, frame: cv2.typing.MatLike):
-        rotated_frame = cv2.rotate(frame, cv2.ROTATE_180)
-        mirrored = cv2.flip(rotated_frame, 1)
-        self.img_item.setImage(mirrored.T)
-
-    @QtCore.Slot(float, float, bool)
-    def on_centroid(self, x, y, found):
-        if found:
-            self.crosshair_v.setPos(x)
-            self.crosshair_h.setPos(y)
-            self.crosshair_v.show()
-            self.crosshair_h.show()
-            self.centroid_label.setText(f"Centroid: {x:.1f}, {y:.1f}")
+    @QtCore.Slot(float, float, bool, float, float, bool)
+    def on_centroid(self, x_l, y_l, found_l, x_r, y_r, found_r):
+        # Update Left
+        if found_l:
+            self.crosshair_v_l.setPos(x_l)
+            self.crosshair_h_l.setPos(y_l)
+            self.crosshair_v_l.show()
+            self.crosshair_h_l.show()
         else:
-            self.crosshair_v.hide()
-            self.crosshair_h.hide()
-            self.centroid_label.setText("Centroid: N/A")
+            self.crosshair_v_l.hide()
+            self.crosshair_h_l.hide()
+
+        # Update Right
+        if found_r:
+            self.crosshair_v_r.setPos(x_r)
+            self.crosshair_h_r.setPos(y_r)
+            self.crosshair_v_r.show()
+            self.crosshair_h_r.show()
+        else:
+            self.crosshair_v_r.hide()
+            self.crosshair_h_r.hide()
+
+        text_l = f"L: {x_l:.1f}, {y_l:.1f}" if found_l else "L: N/A"
+        text_r = f"R: {x_r:.1f}, {y_r:.1f}" if found_r else "R: N/A"
+        self.centroid_label.setText(f"Centroid: {text_l} | {text_r}")
 
     @QtCore.Slot(np.ndarray)
     def on_position(self, pos):
@@ -575,7 +552,6 @@ class MainWindow(QtWidgets.QMainWindow):
         config_to_save = {
             'exposure': self.worker.exposure,
             'iso': self.worker.iso,
-            'threshold': self.worker.threshold
         }
         config_to_save.update(self.worker.blob_params)
         save_config(config_to_save)

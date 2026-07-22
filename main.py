@@ -125,6 +125,7 @@ def rectify(calibration: dai.CalibrationHandler, resolution: typing.Tuple[int, i
 
 class BlobDetector():
     def __init__(self, config):
+        self.detector = None
         self.update_params(config)
 
     def update_params(self, config):
@@ -151,7 +152,7 @@ class BlobDetector():
             return True, biggest[0], biggest[1]
         return False, -1, -1
 
-def DLT(
+def triangulate(
         proj_l: np.ndarray,
         proj_r: np.ndarray,
         point_l: typing.Tuple[float, float],
@@ -163,6 +164,8 @@ def DLT(
     points4d: np.ndarray = cv2.triangulatePoints(proj_l, proj_r, points_l, points_r)
     first = points4d[:, 0]
     first = first[:3] / first[3]  # homogenous -> cartesian
+    # OpenCV's camera coordinate convention defines +Y as pointing DOWN, but who tf does that.
+    first[1] *= -1
     return first
 
 class Worker(QtCore.QThread):
@@ -229,7 +232,7 @@ class Worker(QtCore.QThread):
                     self.centroid_ready.emit(cX_l, disp_cY_l, s_l, cX_r, disp_cY_r, s_r)
 
                     if s_l and s_r:
-                        tracked_pos = DLT(cam_params_l.projection, cam_params_r.projection, (cX_l, cY_l), (cX_r, cY_r))
+                        tracked_pos = triangulate(cam_params_l.projection, cam_params_r.projection, (cX_l, cY_l), (cX_r, cY_r))
                         self.position_ready.emit(tracked_pos)
 
                         tracked_pos_with_empty_rotation = np.zeros(6)

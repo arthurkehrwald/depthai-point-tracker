@@ -111,17 +111,30 @@ def rectify(calibration: dai.CalibrationHandler, resolution: typing.Tuple[int, i
     return (CameraSocketParams(intrinsics_l, distortion_l, rotation_l, projection_l),
             CameraSocketParams(intrinsics_r, distortion_r, rotation_r, projection_r))
 
+class BlobDetector():
+    def __init__(self):
+        params = cv2.SimpleBlobDetector.Params()
+        params.minThreshold = 80
+        params.maxThreshold = 255
+        params.filterByColor = True
+        params.blobColor = 255
+        params.filterByArea = True
+        params.minArea = 20
+        params.maxArea = 1000
+        params.filterByCircularity = True
+        params.minCircularity = 0.7
+        params.filterByConvexity = True
+        params.minConvexity = 0.9
+        params.filterByInertia = True
+        params.minInertiaRatio = 0.6
+        self.detector = cv2.SimpleBlobDetector.create(params)
 
-def try_get_centroid(
-        img: cv2.typing.MatLike, threshold01: float
-) -> typing.Tuple[bool, float, float]:
-    ret, thresh = cv2.threshold(img, 254 * threshold01, 255, 0)
-    M = cv2.moments(thresh)
-    if M["m00"] == 0.0:
+    def detect(self, img: cv2.typing.MatLike) -> typing.Tuple[bool, float, float]:
+        keypoints = self.detector.detect(img)
+        if keypoints:
+            biggest = max(keypoints, key=lambda kp: kp.size).pt
+            return True, biggest[0], biggest[1]
         return False, -1, -1
-    cX = M["m10"] / M["m00"]
-    cY = M["m01"] / M["m00"]
-    return True, cX, cY
 
 def DLT(
         proj_l: np.ndarray,
@@ -160,6 +173,7 @@ class Worker(QtCore.QThread):
             cam_params_l, cam_params_r = rectify(calibration, resolution)
             pipeline_l = MonoPipeline(pipeline, resolution, cam_params_l, is_left=True)
             pipeline_r = MonoPipeline(pipeline, resolution, cam_params_r, is_left=False)
+            blob_detector = BlobDetector()
 
             IP = "127.0.0.1"
             PORT = 4241
@@ -177,8 +191,8 @@ class Worker(QtCore.QThread):
                 success_r, img_r = pipeline_r.try_get_img()
 
                 if success_l and success_r and img_l is not None and img_r is not None:
-                    s_l, cX_l, cY_l = try_get_centroid(img_l, self.threshold)
-                    s_r, cX_r, cY_r = try_get_centroid(img_r, self.threshold)
+                    s_l, cX_l, cY_l = blob_detector.detect(img_l)
+                    s_r, cX_r, cY_r = blob_detector.detect(img_r)
 
                     img_to_show = img_l if self.view_left else img_r
                     found_to_show = s_l if self.view_left else s_r

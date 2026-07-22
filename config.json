@@ -1,1 +1,1 @@
-{"exposure": 100, "iso": 333, "threshold": 0.91}
+{"exposure": 1321, "iso": 173, "threshold": 0.9, "blob_min_threshold": 80, "blob_max_threshold": 255, "blob_min_area": 5, "blob_max_area": 1000, "blob_min_circularity": 0.7, "blob_min_convexity": 0.65, "blob_min_inertia": 0.6}

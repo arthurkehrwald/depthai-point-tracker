@@ -22,7 +22,18 @@ def load_config():
                 return json.load(f)
         except Exception:
             pass
-    return {"exposure": 200, "iso": 100, "threshold": 0.9}
+    return {
+        "exposure": 200,
+        "iso": 100,
+        "threshold": 0.9,
+        "blob_min_threshold": 80,
+        "blob_max_threshold": 255,
+        "blob_min_area": 20,
+        "blob_max_area": 1000,
+        "blob_min_circularity": 0.7,
+        "blob_min_convexity": 0.9,
+        "blob_min_inertia": 0.6
+    }
 
 def save_config(config):
     with open(CONFIG_FILE, "w") as f:
@@ -112,21 +123,24 @@ def rectify(calibration: dai.CalibrationHandler, resolution: typing.Tuple[int, i
             CameraSocketParams(intrinsics_r, distortion_r, rotation_r, projection_r))
 
 class BlobDetector():
-    def __init__(self):
+    def __init__(self, config):
+        self.update_params(config)
+
+    def update_params(self, config):
         params = cv2.SimpleBlobDetector.Params()
-        params.minThreshold = 80
-        params.maxThreshold = 255
+        params.minThreshold = config.get("blob_min_threshold", 80)
+        params.maxThreshold = config.get("blob_max_threshold", 255)
         params.filterByColor = True
         params.blobColor = 255
         params.filterByArea = True
-        params.minArea = 20
-        params.maxArea = 1000
+        params.minArea = config.get("blob_min_area", 20)
+        params.maxArea = config.get("blob_max_area", 1000)
         params.filterByCircularity = True
-        params.minCircularity = 0.7
+        params.minCircularity = config.get("blob_min_circularity", 0.7)
         params.filterByConvexity = True
-        params.minConvexity = 0.9
+        params.minConvexity = config.get("blob_min_convexity", 0.9)
         params.filterByInertia = True
-        params.minInertiaRatio = 0.6
+        params.minInertiaRatio = config.get("blob_min_inertia", 0.6)
         self.detector = cv2.SimpleBlobDetector.create(params)
 
     def detect(self, img: cv2.typing.MatLike) -> typing.Tuple[bool, float, float]:
@@ -164,7 +178,17 @@ class Worker(QtCore.QThread):
         self.exposure = int(config.get('exposure', 200))
         self.iso = int(config.get('iso', 100))
         self.threshold = float(config.get('threshold', 0.9))
+        self.blob_params = {
+            "blob_min_threshold": config.get("blob_min_threshold", 80),
+            "blob_max_threshold": config.get("blob_max_threshold", 255),
+            "blob_min_area": config.get("blob_min_area", 20),
+            "blob_max_area": config.get("blob_max_area", 1000),
+            "blob_min_circularity": config.get("blob_min_circularity", 0.7),
+            "blob_min_convexity": config.get("blob_min_convexity", 0.9),
+            "blob_min_inertia": config.get("blob_min_inertia", 0.6)
+        }
         self.settings_changed = True
+        self.blob_settings_changed = True
 
     def run(self):
         with dai.Pipeline() as pipeline:
@@ -173,7 +197,7 @@ class Worker(QtCore.QThread):
             cam_params_l, cam_params_r = rectify(calibration, resolution)
             pipeline_l = MonoPipeline(pipeline, resolution, cam_params_l, is_left=True)
             pipeline_r = MonoPipeline(pipeline, resolution, cam_params_r, is_left=False)
-            blob_detector = BlobDetector()
+            blob_detector = BlobDetector(self.blob_params)
 
             IP = "127.0.0.1"
             PORT = 4241
@@ -186,6 +210,10 @@ class Worker(QtCore.QThread):
                     pipeline_l.set_exposure(self.exposure, self.iso)
                     pipeline_r.set_exposure(self.exposure, self.iso)
                     self.settings_changed = False
+
+                if self.blob_settings_changed:
+                    blob_detector.update_params(self.blob_params)
+                    self.blob_settings_changed = False
 
                 success_l, img_l = pipeline_l.try_get_img()
                 success_r, img_r = pipeline_r.try_get_img()
@@ -283,6 +311,78 @@ class MainWindow(QtWidgets.QMainWindow):
         thresh_h.addWidget(self.thresh_spin)
         controls_layout.addLayout(thresh_h)
 
+        # Blob Detector Settings
+        controls_layout.addSpacing(20)
+        controls_layout.addWidget(QtWidgets.QLabel("<b>Blob Detector Settings</b>"))
+
+        # Blob Min/Max Threshold
+        controls_layout.addWidget(QtWidgets.QLabel("Blob Threshold (Min/Max):"))
+        self.blob_min_thresh_spin = QtWidgets.QSpinBox()
+        self.blob_min_thresh_spin.setRange(0, 255)
+        self.blob_min_thresh_spin.setValue(self.config['blob_min_threshold'])
+        self.blob_max_thresh_spin = QtWidgets.QSpinBox()
+        self.blob_max_thresh_spin.setRange(0, 255)
+        self.blob_max_thresh_spin.setValue(self.config['blob_max_threshold'])
+        blob_thresh_h = QtWidgets.QHBoxLayout()
+        blob_thresh_h.addWidget(self.blob_min_thresh_spin)
+        blob_thresh_h.addWidget(self.blob_max_thresh_spin)
+        controls_layout.addLayout(blob_thresh_h)
+
+        # Blob Min/Max Area
+        controls_layout.addWidget(QtWidgets.QLabel("Blob Area (Min/Max):"))
+        self.blob_min_area_spin = QtWidgets.QSpinBox()
+        self.blob_min_area_spin.setRange(1, 10000)
+        self.blob_min_area_spin.setValue(self.config['blob_min_area'])
+        self.blob_max_area_spin = QtWidgets.QSpinBox()
+        self.blob_max_area_spin.setRange(1, 10000)
+        self.blob_max_area_spin.setValue(self.config['blob_max_area'])
+        blob_area_h = QtWidgets.QHBoxLayout()
+        blob_area_h.addWidget(self.blob_min_area_spin)
+        blob_area_h.addWidget(self.blob_max_area_spin)
+        controls_layout.addLayout(blob_area_h)
+
+        # Blob Circularity
+        controls_layout.addWidget(QtWidgets.QLabel("Min Circularity:"))
+        self.blob_circ_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.blob_circ_slider.setRange(0, 100)
+        self.blob_circ_slider.setValue(int(self.config['blob_min_circularity'] * 100))
+        self.blob_circ_spin = QtWidgets.QDoubleSpinBox()
+        self.blob_circ_spin.setRange(0.0, 1.0)
+        self.blob_circ_spin.setSingleStep(0.05)
+        self.blob_circ_spin.setValue(self.config['blob_min_circularity'])
+        blob_circ_h = QtWidgets.QHBoxLayout()
+        blob_circ_h.addWidget(self.blob_circ_slider)
+        blob_circ_h.addWidget(self.blob_circ_spin)
+        controls_layout.addLayout(blob_circ_h)
+
+        # Blob Convexity
+        controls_layout.addWidget(QtWidgets.QLabel("Min Convexity:"))
+        self.blob_conv_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.blob_conv_slider.setRange(0, 100)
+        self.blob_conv_slider.setValue(int(self.config['blob_min_convexity'] * 100))
+        self.blob_conv_spin = QtWidgets.QDoubleSpinBox()
+        self.blob_conv_spin.setRange(0.0, 1.0)
+        self.blob_conv_spin.setSingleStep(0.05)
+        self.blob_conv_spin.setValue(self.config['blob_min_convexity'])
+        blob_conv_h = QtWidgets.QHBoxLayout()
+        blob_conv_h.addWidget(self.blob_conv_slider)
+        blob_conv_h.addWidget(self.blob_conv_spin)
+        controls_layout.addLayout(blob_conv_h)
+
+        # Blob Inertia
+        controls_layout.addWidget(QtWidgets.QLabel("Min Inertia Ratio:"))
+        self.blob_inert_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.blob_inert_slider.setRange(0, 100)
+        self.blob_inert_slider.setValue(int(self.config['blob_min_inertia'] * 100))
+        self.blob_inert_spin = QtWidgets.QDoubleSpinBox()
+        self.blob_inert_spin.setRange(0.0, 1.0)
+        self.blob_inert_spin.setSingleStep(0.05)
+        self.blob_inert_spin.setValue(self.config['blob_min_inertia'])
+        blob_inert_h = QtWidgets.QHBoxLayout()
+        blob_inert_h.addWidget(self.blob_inert_slider)
+        blob_inert_h.addWidget(self.blob_inert_spin)
+        controls_layout.addLayout(blob_inert_h)
+
         # View Options
         controls_layout.addSpacing(20)
         controls_layout.addWidget(QtWidgets.QLabel("<b>View Options</b>"))
@@ -372,6 +472,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.thresh_slider.valueChanged.connect(lambda v: self.thresh_spin.setValue(v / 100.0))
         self.thresh_spin.valueChanged.connect(self.update_threshold)
 
+        self.blob_min_thresh_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_threshold", v))
+        self.blob_max_thresh_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_max_threshold", v))
+        self.blob_min_area_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_area", v))
+        self.blob_max_area_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_max_area", v))
+        self.blob_circ_slider.valueChanged.connect(lambda v: self.blob_circ_spin.setValue(v / 100.0))
+        self.blob_circ_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_circularity", v))
+        self.blob_conv_slider.valueChanged.connect(lambda v: self.blob_conv_spin.setValue(v / 100.0))
+        self.blob_conv_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_convexity", v))
+        self.blob_inert_slider.valueChanged.connect(lambda v: self.blob_inert_spin.setValue(v / 100.0))
+        self.blob_inert_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_inertia", v))
+
         self.left_cam_radio.toggled.connect(self.update_view_selection)
         self.right_cam_radio.toggled.connect(self.update_view_selection)
         self.unchanged_radio.toggled.connect(self.update_view_selection)
@@ -404,6 +515,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.thresh_slider.blockSignals(True)
         self.thresh_slider.setValue(int(val * 100))
         self.thresh_slider.blockSignals(False)
+
+    def update_blob_param(self, name, val):
+        self.worker.blob_params[name] = val
+        self.worker.blob_settings_changed = True
+        if name == "blob_min_circularity":
+            self.blob_circ_slider.blockSignals(True)
+            self.blob_circ_slider.setValue(int(val * 100))
+            self.blob_circ_slider.blockSignals(False)
+        elif name == "blob_min_convexity":
+            self.blob_conv_slider.blockSignals(True)
+            self.blob_conv_slider.setValue(int(val * 100))
+            self.blob_conv_slider.blockSignals(False)
+        elif name == "blob_min_inertia":
+            self.blob_inert_slider.blockSignals(True)
+            self.blob_inert_slider.setValue(int(val * 100))
+            self.blob_inert_slider.blockSignals(False)
 
     def update_view_selection(self):
         self.worker.view_left = self.left_cam_radio.isChecked()
@@ -445,11 +572,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         self.worker.stop()
-        save_config({
+        config_to_save = {
             'exposure': self.worker.exposure,
             'iso': self.worker.iso,
             'threshold': self.worker.threshold
-        })
+        }
+        config_to_save.update(self.worker.blob_params)
+        save_config(config_to_save)
         event.accept()
 
 

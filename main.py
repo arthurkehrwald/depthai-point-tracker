@@ -42,88 +42,118 @@ def save_config(config):
 
 @dataclass(frozen=True)
 class CameraSocketParams:
-    intrinsics: np.ndarray
-    distortion: np.ndarray
-    rotation: np.ndarray
     projection: np.ndarray
+    rectify_map_x: np.ndarray
+    rectify_map_y: np.ndarray
 
 
-class MonoPipeline:
+class StereoCamera:
     def __init__(
-            self, pipeline: dai.Pipeline, resolution: typing.Tuple[int, int], cam_params: CameraSocketParams, sync_node: dai.node.Sync, is_left: bool,
+            self, pipeline: dai.Pipeline, resolution: typing.Tuple[int, int]
     ) -> None:
         self.pipeline = pipeline
         self.resolution = resolution
-        self.is_left = is_left
-        self.rectify_map_x, self.rectify_map_y = cv2.initUndistortRectifyMap(
-            cam_params.intrinsics, cam_params.distortion,
-            cam_params.rotation, cam_params.projection,
-            resolution,
+
+        self.cam_params_l, self.cam_params_r = self.compute_stereo_rectification()
+
+        sync = pipeline.create(dai.node.Sync)
+        sync.setRunOnHost(True)
+        cam_l = self.pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
+        cam_l.requestOutput(self.resolution).link(sync.inputs["left"])
+        cam_r = self.pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
+        cam_r.requestOutput(self.resolution).link(sync.inputs["right"])
+        self.synced_q = sync.out.createOutputQueue()
+
+        control_in_l = cam_l.inputControl
+        self.ctrl_q_l = control_in_l.createInputQueue()
+        control_in_r = cam_r.inputControl
+        self.ctrl_q_r = control_in_r.createInputQueue()
+
+    def compute_stereo_rectification(self) -> typing.Tuple[CameraSocketParams, CameraSocketParams]:
+        calibration = self.pipeline.getDefaultDevice().readCalibration()
+        intrinsics_l = np.array(
+            calibration.getCameraIntrinsics(
+                dai.CameraBoardSocket.CAM_B, self.resolution[0], self.resolution[1]
+            ),
+        )
+        intrinsics_r = np.array(
+            calibration.getCameraIntrinsics(
+                dai.CameraBoardSocket.CAM_C, self.resolution[0], self.resolution[1]
+            ),
+        )
+
+        distortion_l = np.array(
+            calibration.getDistortionCoefficients(dai.CameraBoardSocket.CAM_B),
+        )
+        distortion_r = np.array(
+            calibration.getDistortionCoefficients(dai.CameraBoardSocket.CAM_C),
+        )
+
+        l_to_r_transformation = np.array(
+            calibration.getCameraExtrinsics(
+                dai.CameraBoardSocket.CAM_B, dai.CameraBoardSocket.CAM_C
+            )
+        )
+        l_to_r_rotation = l_to_r_transformation[:3, :3]
+        l_to_r_translation = l_to_r_transformation[:3, 3:4]
+
+        rotation_l, rotation_r, projection_l, projection_r, _, _, _ = cv2.stereoRectify(
+            intrinsics_l, distortion_l.flatten(),
+            intrinsics_r, distortion_r.flatten(),
+            imageSize=self.resolution,
+            R=l_to_r_rotation,
+            T=l_to_r_translation,
+            flags=cv2.CALIB_ZERO_DISPARITY,
+            alpha=0
+        )
+
+        rectify_map_l_x, rectify_map_l_y = cv2.initUndistortRectifyMap(
+            intrinsics_l, distortion_l,
+            rotation_l, projection_l,
+            self.resolution,
+            cv2.CV_16SC2
+        )
+        rectify_map_r_x, rectify_map_r_y = cv2.initUndistortRectifyMap(
+            intrinsics_r, distortion_r,
+            rotation_r, projection_r,
+            self.resolution,
             cv2.CV_16SC2
         )
 
-        # Request mono output
-        self.socket = (
-            dai.CameraBoardSocket.CAM_B if self.is_left else dai.CameraBoardSocket.CAM_C
-        )
-        cam = self.pipeline.create(dai.node.Camera).build(self.socket)
-        cam.requestOutput(self.resolution).link(sync_node.inputs["left" if is_left else "right"])
+        return (CameraSocketParams(projection_l, rectify_map_l_x, rectify_map_l_y),
+                CameraSocketParams(projection_r, rectify_map_r_x, rectify_map_r_y))
 
-        self.control_in = cam.inputControl
-        self.ctrl_q = self.control_in.createInputQueue()
+    def try_get_stereo_frames(self) -> typing.Tuple[bool, np.ndarray | None, np.ndarray | None]:
+        message_group = self.synced_q.get()
+        if isinstance(message_group, dai.MessageGroup):
+            left = message_group["left"]
+            right = message_group["right"]
+            if isinstance(left, dai.ImgFrame) and isinstance(right, dai.ImgFrame):
+                rect_l = cv2.remap(left.getCvFrame(), self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y, cv2.INTER_LINEAR)
+                rect_r = cv2.remap(right.getCvFrame(), self.cam_params_r.rectify_map_x, self.cam_params_r.rectify_map_y, cv2.INTER_LINEAR)
+                return True, rect_l, rect_r
+        return False, None, None
+    
+    def triangulate(
+            self,
+            point_l: typing.Tuple[float, float],
+            point_r: typing.Tuple[float, float],
+    ) -> np.ndarray:
+        # cv.triangulatePoints operates on 2xN arrays of points
+        points_l = np.array(point_l).reshape(2, 1)
+        points_r = np.array(point_r).reshape(2, 1)
+        points4d: np.ndarray = cv2.triangulatePoints(self.cam_params_l.projection, self.cam_params_r.projection, points_l, points_r)
+        first = points4d[:, 0]
+        first = first[:3] / first[3]  # homogenous -> cartesian
+        # OpenCV's camera coordinate convention defines +Y as pointing DOWN, but who tf does that.
+        first[1] *= -1
+        return first
 
     def set_exposure(self, exp_time: int, sens_iso: int) -> None:
         msg = dai.CameraControl()
         msg.setManualExposure(exp_time, sens_iso)
-        self.ctrl_q.send(msg)
-
-    def rectify(self, img: cv2.typing.MatLike):
-        return cv2.remap(img, self.rectify_map_x, self.rectify_map_y, cv2.INTER_LINEAR)
-
-def try_get_stereo_frames(q: dai.MessageQueue) -> typing.Tuple[bool, cv2.typing.MatLike | None, cv2.typing.MatLike | None]:
-    message_group = q.get()
-    if isinstance(message_group, dai.MessageGroup):
-        left = message_group["left"]
-        right = message_group["right"]
-        if isinstance(left, dai.ImgFrame) and isinstance(right, dai.ImgFrame):
-            return True, left.getCvFrame(), right.getCvFrame()
-    return False, None, None
-
-def compute_stereo_rectification(calibration: dai.CalibrationHandler, resolution: typing.Tuple[int, int]) -> typing.Tuple[CameraSocketParams, CameraSocketParams]:
-    intrinsics_l = np.array(
-        calibration.getCameraIntrinsics(
-            dai.CameraBoardSocket.CAM_B, resolution[0], resolution[1]
-        ),
-    )
-    intrinsics_r = np.array(
-        calibration.getCameraIntrinsics(
-            dai.CameraBoardSocket.CAM_C, resolution[0], resolution[1]
-        ),
-    )
-    distortion_l = np.array(
-        calibration.getDistortionCoefficients(dai.CameraBoardSocket.CAM_B),
-    )
-    distortion_r = np.array(
-        calibration.getDistortionCoefficients(dai.CameraBoardSocket.CAM_C),
-    )
-    l_to_r_transformation = np.array(
-        calibration.getCameraExtrinsics(
-            dai.CameraBoardSocket.CAM_B, dai.CameraBoardSocket.CAM_C
-        )
-    )
-    l_to_r_rotation = l_to_r_transformation[:3, :3]
-    l_to_r_translation = l_to_r_transformation[:3, 3:4]
-    rotation_l, rotation_r, projection_l, projection_r, _, _, _ = cv2.stereoRectify(
-        intrinsics_l, distortion_l.flatten(),
-        intrinsics_r, distortion_r.flatten(),
-        imageSize=resolution,
-        R=l_to_r_rotation,
-        T=l_to_r_translation,
-        flags=cv2.CALIB_ZERO_DISPARITY,
-        alpha=0
-    )
-    return (CameraSocketParams(intrinsics_l, distortion_l, rotation_l, projection_l),
-            CameraSocketParams(intrinsics_r, distortion_r, rotation_r, projection_r))
+        self.ctrl_q_l.send(msg)
+        self.ctrl_q_r.send(msg)
 
 class BlobDetector:
     def __init__(self, config):
@@ -154,22 +184,6 @@ class BlobDetector:
             return True, biggest[0], biggest[1]
         return False, -1, -1
 
-def triangulate(
-        proj_l: np.ndarray,
-        proj_r: np.ndarray,
-        point_l: typing.Tuple[float, float],
-        point_r: typing.Tuple[float, float],
-) -> np.ndarray:
-    # cv.triangulatePoints operates on 2xN arrays of points
-    points_l = np.array(point_l).reshape(2, 1)
-    points_r = np.array(point_r).reshape(2, 1)
-    points4d: np.ndarray = cv2.triangulatePoints(proj_l, proj_r, points_l, points_r)
-    first = points4d[:, 0]
-    first = first[:3] / first[3]  # homogenous -> cartesian
-    # OpenCV's camera coordinate convention defines +Y as pointing DOWN, but who tf does that.
-    first[1] *= -1
-    return first
-
 class Worker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray, np.ndarray)
     centroid_ready = QtCore.Signal(float, float, bool, float, float, bool)
@@ -195,14 +209,7 @@ class Worker(QtCore.QThread):
 
     def run(self):
         with dai.Pipeline() as pipeline:
-            resolution = CAMERA_RESOLUTION
-            calibration = pipeline.getDefaultDevice().readCalibration()
-            cam_params_l, cam_params_r = compute_stereo_rectification(calibration, resolution)
-            sync = pipeline.create(dai.node.Sync)
-            sync.setRunOnHost(True)
-            pipeline_l = MonoPipeline(pipeline, resolution, cam_params_l, sync, is_left=True)
-            pipeline_r = MonoPipeline(pipeline, resolution, cam_params_r, sync, is_left=False)
-            synced_q = sync.out.createOutputQueue()
+            stereo_cam = StereoCamera(pipeline, CAMERA_RESOLUTION)
             blob_detector = BlobDetector(self.blob_params)
 
             IP = "127.0.0.1"
@@ -213,20 +220,16 @@ class Worker(QtCore.QThread):
 
             while self.running and pipeline.isRunning():
                 if self.settings_changed:
-                    pipeline_l.set_exposure(self.exposure, self.iso)
-                    pipeline_r.set_exposure(self.exposure, self.iso)
+                    stereo_cam.set_exposure(self.exposure, self.iso)
                     self.settings_changed = False
 
                 if self.blob_settings_changed:
                     blob_detector.update_params(self.blob_params)
                     self.blob_settings_changed = False
 
-                success, img_l, img_r = try_get_stereo_frames(synced_q)
+                success, img_l, img_r = stereo_cam.try_get_stereo_frames()
 
                 if success and img_l is not None and img_r is not None:
-                    img_l = pipeline_l.rectify(img_l)
-                    img_r = pipeline_r.rectify(img_r)
-
                     s_l, cX_l, cY_l = blob_detector.detect(img_l)
                     s_r, cX_r, cY_r = blob_detector.detect(img_r)
 
@@ -239,7 +242,7 @@ class Worker(QtCore.QThread):
                     self.centroid_ready.emit(cX_l, disp_cY_l, s_l, cX_r, disp_cY_r, s_r)
 
                     if s_l and s_r:
-                        tracked_pos = triangulate(cam_params_l.projection, cam_params_r.projection, (cX_l, cY_l), (cX_r, cY_r))
+                        tracked_pos = stereo_cam.triangulate((cX_l, cY_l), (cX_r, cY_r))
                         self.position_ready.emit(tracked_pos)
 
                         tracked_pos_with_empty_rotation = np.zeros(6)

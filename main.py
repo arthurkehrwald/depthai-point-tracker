@@ -7,6 +7,7 @@ import depthai as dai
 import typing
 import time
 from pathlib import Path
+from dataclasses import dataclass
 
 from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
@@ -27,28 +28,34 @@ def save_config(config):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f)
 
+@dataclass(frozen=True)
+class CameraSocketParams:
+    intrinsics: np.ndarray
+    distortion: np.ndarray
+    rotation: np.ndarray
+    projection: np.ndarray
+
+
 class MonoPipeline:
     def __init__(
-            self, pipeline: dai.Pipeline, is_left: bool
+            self, pipeline: dai.Pipeline, resolution: typing.Tuple[int, int], cam_params: CameraSocketParams, is_left: bool,
     ) -> None:
         self.pipeline = pipeline
+        self.resolution = resolution
         self.is_left = is_left
+        self.calib_data = self.pipeline.getDefaultDevice().readCalibration()
+        self.rectify_map_x, self.rectify_map_y = cv2.initUndistortRectifyMap(
+            cam_params.intrinsics, cam_params.distortion,
+            cam_params.rotation, cam_params.projection,
+            resolution,
+            cv2.CV_16SC2
+        )
+
+        # Request mono output
         self.socket = (
             dai.CameraBoardSocket.CAM_B if self.is_left else dai.CameraBoardSocket.CAM_C
         )
         self.cam = self.pipeline.create(dai.node.Camera).build(self.socket)
-        self.resolution = (1280, 720)
-        self.calib_data = self.pipeline.getDefaultDevice().readCalibration()
-
-        # Rectification parameters
-        intrinsics = np.array(self.calib_data.getCameraIntrinsics(self.socket, self.resolution[0], self.resolution[1]))
-        intrinsics_r = np.array(
-            self.calib_data.getCameraIntrinsics(dai.CameraBoardSocket.CAM_C, self.resolution[0], self.resolution[1]))
-        rotation = np.array(
-            self.calib_data.getStereoLeftRectificationRotation() if self.is_left else self.calib_data.getStereoRightRectificationRotation())
-        self.rectification = intrinsics_r @ rotation @ np.linalg.inv(intrinsics)
-
-        # Request mono output
         self.mono_out = self.cam.requestOutput(self.resolution)
         self.img_q = self.mono_out.createOutputQueue(maxSize=1, blocking=False)
         self.control_in = self.cam.inputControl
@@ -59,30 +66,51 @@ class MonoPipeline:
         msg.setManualExposure(exp_time, sens_iso)
         self.ctrl_q.send(msg)
 
-    def get_projection_matrix(self) -> np.ndarray:
-        device = self.pipeline.getDefaultDevice()
-        calib_data = device.readCalibration()
-        intrinsics = calib_data.getCameraIntrinsics(self.socket, 1280, 720)
-        P = np.zeros((3, 4))
-        P[:3, :3] = intrinsics
-        if not self.is_left:
-            return P
-        extrinsics = np.array(
-            calib_data.getCameraExtrinsics(
-                dai.CameraBoardSocket.CAM_B, dai.CameraBoardSocket.CAM_C
-            )
-        )
-        return P @ extrinsics
-
     def try_get_img(self) -> typing.Tuple[bool, cv2.typing.MatLike | None]:
         if self.img_q.has():
             img = self.img_q.get()
             if isinstance(img, dai.ImgFrame):
                 img = img.getCvFrame()
-                rectified = cv2.warpPerspective(img, self.rectification, img.shape[::-1],
-                                                cv2.INTER_CUBIC + cv2.WARP_FILL_OUTLIERS + cv2.WARP_INVERSE_MAP)
+                rectified = cv2.remap(img, self.rectify_map_x, self.rectify_map_y, cv2.INTER_LINEAR)
                 return True, rectified
         return False, None
+
+def rectify(calibration: dai.CalibrationHandler, resolution: typing.Tuple[int, int]) -> typing.Tuple[CameraSocketParams, CameraSocketParams]:
+    intrinsics_l = np.array(
+        calibration.getCameraIntrinsics(
+            dai.CameraBoardSocket.CAM_B, resolution[0], resolution[1]
+        ),
+    )
+    intrinsics_r = np.array(
+        calibration.getCameraIntrinsics(
+            dai.CameraBoardSocket.CAM_C, resolution[0], resolution[1]
+        ),
+    )
+    distortion_l = np.array(
+        calibration.getDistortionCoefficients(dai.CameraBoardSocket.CAM_B),
+    )
+    distortion_r = np.array(
+        calibration.getDistortionCoefficients(dai.CameraBoardSocket.CAM_C),
+    )
+    l_to_r_transformation = np.array(
+        calibration.getCameraExtrinsics(
+            dai.CameraBoardSocket.CAM_B, dai.CameraBoardSocket.CAM_C
+        )
+    )
+    l_to_r_rotation = l_to_r_transformation[:3, :3]
+    l_to_r_translation = l_to_r_transformation[:3, 3:4]
+    rotation_l, rotation_r, projection_l, projection_r, _, _, _ = cv2.stereoRectify(
+        intrinsics_l, distortion_l.flatten(),
+        intrinsics_r, distortion_r.flatten(),
+        imageSize=resolution,
+        R=l_to_r_rotation,
+        T=l_to_r_translation,
+        flags=cv2.CALIB_ZERO_DISPARITY,
+        alpha=0
+    )
+    return (CameraSocketParams(intrinsics_l, distortion_l, rotation_l, projection_l),
+            CameraSocketParams(intrinsics_r, distortion_r, rotation_r, projection_r))
+
 
 def try_get_centroid(
         img: cv2.typing.MatLike, threshold01: float
@@ -101,10 +129,10 @@ def DLT(
         point_l: typing.Tuple[float, float],
         point_r: typing.Tuple[float, float],
 ) -> np.ndarray:
-    # cv.triangulatePoints operates on lists of points
-    points_l = np.array(point_l)
-    points_r = np.array(point_r)
-    points4d: np.ndarray = cv2.triangulatePoints(proj_r, proj_l, points_r, points_l)
+    # cv.triangulatePoints operates on 2xN arrays of points
+    points_l = np.array(point_l).reshape(2, 1)
+    points_r = np.array(point_r).reshape(2, 1)
+    points4d: np.ndarray = cv2.triangulatePoints(proj_l, proj_r, points_l, points_r)
     first = points4d[:, 0]
     first = first[:3] / first[3]  # homogenous -> cartesian
     return first
@@ -127,17 +155,18 @@ class Worker(QtCore.QThread):
 
     def run(self):
         with dai.Pipeline() as pipeline:
-            pipeline_l = MonoPipeline(pipeline, is_left=True)
-            pipeline_r = MonoPipeline(pipeline, is_left=False)
+            resolution = (1280, 720)
+            calibration = pipeline.getDefaultDevice().readCalibration()
+            cam_params_l, cam_params_r = rectify(calibration, resolution)
+            pipeline_l = MonoPipeline(pipeline, resolution, cam_params_l, is_left=True)
+            pipeline_r = MonoPipeline(pipeline, resolution, cam_params_r, is_left=False)
 
             IP = "127.0.0.1"
             PORT = 4241
             sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
             pipeline.start()
-            
-            p_l = pipeline_l.get_projection_matrix()
-            p_r = pipeline_r.get_projection_matrix()
+
             while self.running and pipeline.isRunning():
                 if self.settings_changed:
                     pipeline_l.set_exposure(self.exposure, self.iso)
@@ -166,7 +195,7 @@ class Worker(QtCore.QThread):
                     self.centroid_ready.emit(cX_to_show, cY_to_show, found_to_show)
 
                     if s_l and s_r:
-                        tracked_pos = DLT(p_r, p_l, (cX_r, cY_r), (cX_l, cY_r))
+                        tracked_pos = DLT(cam_params_l.projection, cam_params_r.projection, (cX_l, cY_l), (cX_r, cY_r))
                         self.position_ready.emit(tracked_pos)
 
                         tracked_pos_with_empty_rotation = np.zeros(6)
@@ -184,22 +213,22 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("DepthAI Point Tracker")
         self.resize(1200, 900)
-        
+
         self.config = load_config()
-        
+
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QtWidgets.QHBoxLayout(central_widget)
-        
+
         # Left Panel: Controls
         controls_panel = QtWidgets.QWidget()
         controls_panel.setFixedWidth(300)
         controls_layout = QtWidgets.QVBoxLayout(controls_panel)
         main_layout.addWidget(controls_panel)
-        
+
         # Camera Settings
         controls_layout.addWidget(QtWidgets.QLabel("<b>Camera Settings</b>"))
-        
+
         # Exposure
         controls_layout.addWidget(QtWidgets.QLabel("Exposure (\u03bcs):"))
         self.exp_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -212,7 +241,7 @@ class MainWindow(QtWidgets.QMainWindow):
         exp_h.addWidget(self.exp_slider)
         exp_h.addWidget(self.exp_spin)
         controls_layout.addLayout(exp_h)
-        
+
         # ISO
         controls_layout.addWidget(QtWidgets.QLabel("ISO:"))
         self.iso_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -225,7 +254,7 @@ class MainWindow(QtWidgets.QMainWindow):
         iso_h.addWidget(self.iso_slider)
         iso_h.addWidget(self.iso_spin)
         controls_layout.addLayout(iso_h)
-        
+
         # Threshold
         controls_layout.addWidget(QtWidgets.QLabel("Threshold (0.0 - 1.0):"))
         self.thresh_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -239,11 +268,11 @@ class MainWindow(QtWidgets.QMainWindow):
         thresh_h.addWidget(self.thresh_slider)
         thresh_h.addWidget(self.thresh_spin)
         controls_layout.addLayout(thresh_h)
-        
+
         # View Options
         controls_layout.addSpacing(20)
         controls_layout.addWidget(QtWidgets.QLabel("<b>View Options</b>"))
-        
+
         # Camera selection group
         self.camera_group = QtWidgets.QButtonGroup(self)
         self.left_cam_radio = QtWidgets.QRadioButton("Left Camera")
@@ -253,9 +282,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.left_cam_radio.setChecked(True)
         controls_layout.addWidget(self.left_cam_radio)
         controls_layout.addWidget(self.right_cam_radio)
-        
+
         controls_layout.addSpacing(10)
-        
+
         # View mode group
         self.view_mode_group = QtWidgets.QButtonGroup(self)
         self.unchanged_radio = QtWidgets.QRadioButton("Unchanged")
@@ -265,7 +294,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.unchanged_radio.setChecked(True)
         controls_layout.addWidget(self.unchanged_radio)
         controls_layout.addWidget(self.thresholded_radio)
-        
+
         # Info
         controls_layout.addStretch()
         controls_layout.addWidget(QtWidgets.QLabel("<b>Tracking Info</b>"))
@@ -273,7 +302,7 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(self.centroid_label)
         self.pos_label = QtWidgets.QLabel("XYZ: N/A")
         controls_layout.addWidget(self.pos_label)
-        
+
         # Right Panel: Visuals
         visuals_layout = QtWidgets.QVBoxLayout()
         main_layout.addLayout(visuals_layout)

@@ -50,12 +50,11 @@ class CameraSocketParams:
 
 class MonoPipeline:
     def __init__(
-            self, pipeline: dai.Pipeline, resolution: typing.Tuple[int, int], cam_params: CameraSocketParams, is_left: bool,
+            self, pipeline: dai.Pipeline, resolution: typing.Tuple[int, int], cam_params: CameraSocketParams, sync_node: dai.node.Sync, is_left: bool,
     ) -> None:
         self.pipeline = pipeline
         self.resolution = resolution
         self.is_left = is_left
-        self.calib_data = self.pipeline.getDefaultDevice().readCalibration()
         self.rectify_map_x, self.rectify_map_y = cv2.initUndistortRectifyMap(
             cam_params.intrinsics, cam_params.distortion,
             cam_params.rotation, cam_params.projection,
@@ -67,10 +66,10 @@ class MonoPipeline:
         self.socket = (
             dai.CameraBoardSocket.CAM_B if self.is_left else dai.CameraBoardSocket.CAM_C
         )
-        self.cam = self.pipeline.create(dai.node.Camera).build(self.socket)
-        self.mono_out = self.cam.requestOutput(self.resolution)
-        self.img_q = self.mono_out.createOutputQueue(maxSize=1, blocking=False)
-        self.control_in = self.cam.inputControl
+        cam = self.pipeline.create(dai.node.Camera).build(self.socket)
+        cam.requestOutput(self.resolution).link(sync_node.inputs["left" if is_left else "right"])
+
+        self.control_in = cam.inputControl
         self.ctrl_q = self.control_in.createInputQueue()
 
     def set_exposure(self, exp_time: int, sens_iso: int) -> None:
@@ -78,16 +77,19 @@ class MonoPipeline:
         msg.setManualExposure(exp_time, sens_iso)
         self.ctrl_q.send(msg)
 
-    def try_get_img(self) -> typing.Tuple[bool, cv2.typing.MatLike | None]:
-        if self.img_q.has():
-            img = self.img_q.get()
-            if isinstance(img, dai.ImgFrame):
-                img = img.getCvFrame()
-                rectified = cv2.remap(img, self.rectify_map_x, self.rectify_map_y, cv2.INTER_LINEAR)
-                return True, rectified
-        return False, None
+    def rectify(self, img: cv2.typing.MatLike):
+        return cv2.remap(img, self.rectify_map_x, self.rectify_map_y, cv2.INTER_LINEAR)
 
-def rectify(calibration: dai.CalibrationHandler, resolution: typing.Tuple[int, int]) -> typing.Tuple[CameraSocketParams, CameraSocketParams]:
+def try_get_stereo_frames(q: dai.MessageQueue) -> typing.Tuple[bool, cv2.typing.MatLike | None, cv2.typing.MatLike | None]:
+    message_group = q.get()
+    if isinstance(message_group, dai.MessageGroup):
+        left = message_group["left"]
+        right = message_group["right"]
+        if isinstance(left, dai.ImgFrame) and isinstance(right, dai.ImgFrame):
+            return True, left.getCvFrame(), right.getCvFrame()
+    return False, None, None
+
+def compute_stereo_rectification(calibration: dai.CalibrationHandler, resolution: typing.Tuple[int, int]) -> typing.Tuple[CameraSocketParams, CameraSocketParams]:
     intrinsics_l = np.array(
         calibration.getCameraIntrinsics(
             dai.CameraBoardSocket.CAM_B, resolution[0], resolution[1]
@@ -123,7 +125,7 @@ def rectify(calibration: dai.CalibrationHandler, resolution: typing.Tuple[int, i
     return (CameraSocketParams(intrinsics_l, distortion_l, rotation_l, projection_l),
             CameraSocketParams(intrinsics_r, distortion_r, rotation_r, projection_r))
 
-class BlobDetector():
+class BlobDetector:
     def __init__(self, config):
         self.detector = None
         self.update_params(config)
@@ -195,9 +197,12 @@ class Worker(QtCore.QThread):
         with dai.Pipeline() as pipeline:
             resolution = CAMERA_RESOLUTION
             calibration = pipeline.getDefaultDevice().readCalibration()
-            cam_params_l, cam_params_r = rectify(calibration, resolution)
-            pipeline_l = MonoPipeline(pipeline, resolution, cam_params_l, is_left=True)
-            pipeline_r = MonoPipeline(pipeline, resolution, cam_params_r, is_left=False)
+            cam_params_l, cam_params_r = compute_stereo_rectification(calibration, resolution)
+            sync = pipeline.create(dai.node.Sync)
+            sync.setRunOnHost(True)
+            pipeline_l = MonoPipeline(pipeline, resolution, cam_params_l, sync, is_left=True)
+            pipeline_r = MonoPipeline(pipeline, resolution, cam_params_r, sync, is_left=False)
+            synced_q = sync.out.createOutputQueue()
             blob_detector = BlobDetector(self.blob_params)
 
             IP = "127.0.0.1"
@@ -216,10 +221,12 @@ class Worker(QtCore.QThread):
                     blob_detector.update_params(self.blob_params)
                     self.blob_settings_changed = False
 
-                success_l, img_l = pipeline_l.try_get_img()
-                success_r, img_r = pipeline_r.try_get_img()
+                success, img_l, img_r = try_get_stereo_frames(synced_q)
 
-                if success_l and success_r and img_l is not None and img_r is not None:
+                if success and img_l is not None and img_r is not None:
+                    img_l = pipeline_l.rectify(img_l)
+                    img_r = pipeline_r.rectify(img_r)
+
                     s_l, cX_l, cY_l = blob_detector.detect(img_l)
                     s_r, cX_r, cY_r = blob_detector.detect(img_r)
 

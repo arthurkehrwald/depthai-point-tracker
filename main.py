@@ -5,13 +5,14 @@ import numpy as np
 import cv2
 import depthai as dai
 import typing
-import time
 from pathlib import Path
 from dataclasses import dataclass
+from types import TracebackType
 
 from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
+
 
 CONFIG_FILE = "config.json"
 CAMERA_RESOLUTION = (1280, 720)
@@ -52,14 +53,15 @@ class CameraSocketParams:
 
 class StereoCamera:
     def __init__(
-            self, pipeline: dai.Pipeline, resolution: typing.Tuple[int, int]
-    ) -> None:
-        self.pipeline = pipeline
+            self, resolution: typing.Tuple[int, int]
+    ):
         self.resolution = resolution
 
+    def __enter__(self) -> "StereoCamera":
+        self.pipeline = dai.Pipeline()
         self.cam_params_l, self.cam_params_r = self.compute_stereo_rectification()
 
-        sync = pipeline.create(dai.node.Sync)
+        sync = self.pipeline.create(dai.node.Sync)
         sync.setRunOnHost(True)
         cam_l = self.pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
         cam_l.requestOutput(self.resolution).link(sync.inputs["left"])
@@ -71,6 +73,13 @@ class StereoCamera:
         self.ctrl_q_l = control_in_l.createInputQueue()
         control_in_r = cam_r.inputControl
         self.ctrl_q_r = control_in_r.createInputQueue()
+        return self
+
+    def start(self):
+        self.pipeline.start()
+
+    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None):
+        self.pipeline.stop()
 
     def compute_stereo_rectification(self) -> typing.Tuple[CameraSocketParams, CameraSocketParams]:
         calibration = self.pipeline.getDefaultDevice().readCalibration()
@@ -216,17 +225,16 @@ class Worker(QtCore.QThread):
         self.blob_settings_changed = True
 
     def run(self):
-        with dai.Pipeline() as pipeline:
-            stereo_cam = StereoCamera(pipeline, CAMERA_RESOLUTION)
+        with StereoCamera(CAMERA_RESOLUTION) as stereo_cam:
             blob_detector = BlobDetector(self.blob_params)
 
             IP = "127.0.0.1"
             PORT = 4241
             sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-            pipeline.start()
+            stereo_cam.start()
 
-            while self.running and pipeline.isRunning():
+            while self.running:
                 if self.settings_changed:
                     stereo_cam.set_exposure(self.exposure, self.iso)
                     self.settings_changed = False
@@ -256,8 +264,6 @@ class Worker(QtCore.QThread):
                         tracked_pos_with_empty_rotation = np.zeros(6)
                         tracked_pos_with_empty_rotation[:3] = tracked_pos
                         sock.sendto(tracked_pos_with_empty_rotation.tobytes(), (IP, PORT))
-
-                time.sleep(0.001)
 
     def stop(self):
         self.running = False

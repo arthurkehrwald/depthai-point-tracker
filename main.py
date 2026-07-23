@@ -160,8 +160,6 @@ class StereoCamera:
                                                      points_l, points_r)
         first = points4d[:, 0]
         first = first[:3] / first[3]  # homogenous -> cartesian
-        # OpenCV's camera coordinate convention defines +Y as pointing DOWN, but who tf does that.
-        first[1] *= -1
         return first
 
     def set_exposure(self, exp_time: int, sens_iso: int) -> None:
@@ -197,7 +195,8 @@ class BlobDetector:
         keypoints = self.detector.detect(img)
         if keypoints:
             biggest = max(keypoints, key=lambda kp: kp.size).pt
-            return True, biggest[0], biggest[1]
+            img_height = np.shape(img)[0]
+            return True, biggest[0], (biggest[1] - img_height) * -1 # Move origin from top to bottom
         return False, -1, -1
 
 
@@ -250,12 +249,7 @@ class Worker(QtCore.QThread):
                     s_r, cX_r, cY_r = blob_detector.detect(img_r)
 
                     self.frame_ready.emit(img_l.copy(), img_r.copy())
-
-                    img_height = np.shape(img_l)[0]
-                    disp_cY_l = (cY_l - img_height) * -1
-                    disp_cY_r = (cY_r - img_height) * -1
-
-                    self.centroid_ready.emit(cX_l, disp_cY_l, s_l, cX_r, disp_cY_r, s_r)
+                    self.centroid_ready.emit(cX_l, cY_l, s_l, cX_r, cY_r, s_r)
 
                     if s_l and s_r:
                         tracked_pos = stereo_cam.triangulate((cX_l, cY_l), (cX_r, cY_r))

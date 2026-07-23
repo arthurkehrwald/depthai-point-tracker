@@ -50,6 +50,14 @@ class CameraSocketParams:
     rectify_map_x: np.ndarray
     rectify_map_y: np.ndarray
 
+@dataclass(frozen=True)
+class StereoFrame:
+    left: np.ndarray
+    right: np.ndarray
+    fps: float
+    time_of_capture: float
+    time_of_arrival: float
+
 
 class StereoCamera:
     def __init__(
@@ -135,18 +143,21 @@ class StereoCamera:
         return (CameraSocketParams(projection_l, rectify_map_l_x, rectify_map_l_y),
                 CameraSocketParams(projection_r, rectify_map_r_x, rectify_map_r_y))
 
-    def try_get_stereo_frames(self) -> typing.Tuple[bool, np.ndarray | None, np.ndarray | None]:
+    def try_get_stereo_frames(self) -> typing.Tuple[bool, StereoFrame | None]:
         message_group = self.synced_q.get()
+        arrival_time = dai.Clock.now().total_seconds()
         if isinstance(message_group, dai.MessageGroup):
             left = message_group["left"]
             right = message_group["right"]
             if isinstance(left, dai.ImgFrame) and isinstance(right, dai.ImgFrame):
+                fps = left.getFps()
+                capture_time = left.getTimestamp().total_seconds()
                 rect_l = cv2.remap(left.getCvFrame(), self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y,
                                    cv2.INTER_LINEAR)
                 rect_r = cv2.remap(right.getCvFrame(), self.cam_params_r.rectify_map_x, self.cam_params_r.rectify_map_y,
                                    cv2.INTER_LINEAR)
-                return True, rect_l, rect_r
-        return False, None, None
+                return True, StereoFrame(rect_l, rect_r, fps, capture_time, arrival_time)
+        return False, None
 
     def triangulate(
             self,
@@ -204,6 +215,7 @@ class Worker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray, np.ndarray)
     centroid_ready = QtCore.Signal(float, float, bool, float, float, bool)
     position_ready = QtCore.Signal(np.ndarray)
+    stats_ready = QtCore.Signal(float, float, float, float)
 
     def __init__(self, config):
         super().__init__()
@@ -242,22 +254,31 @@ class Worker(QtCore.QThread):
                     blob_detector.update_params(self.blob_params)
                     self.blob_settings_changed = False
 
-                success, img_l, img_r = stereo_cam.try_get_stereo_frames()
+                success, frame = stereo_cam.try_get_stereo_frames()
 
-                if success and img_l is not None and img_r is not None:
-                    s_l, cX_l, cY_l = blob_detector.detect(img_l)
-                    s_r, cX_r, cY_r = blob_detector.detect(img_r)
+                if success and frame is not None:
+                    s_l, cX_l, cY_l = blob_detector.detect(frame.left)
+                    s_r, cX_r, cY_r = blob_detector.detect(frame.right)
 
-                    self.frame_ready.emit(img_l.copy(), img_r.copy())
+                    self.frame_ready.emit(frame.left.copy(), frame.right.copy())
                     self.centroid_ready.emit(cX_l, cY_l, s_l, cX_r, cY_r, s_r)
+
+                    latency_arrival = (frame.time_of_arrival - frame.time_of_capture) * 1000
+                    latency_calc = -1.0
+                    latency_total = -1.0
 
                     if s_l and s_r:
                         tracked_pos = stereo_cam.triangulate((cX_l, cY_l), (cX_r, cY_r))
+                        t_3d_finished = dai.Clock.now().total_seconds()
+                        latency_calc = (t_3d_finished - frame.time_of_arrival) * 1000
+                        latency_total = (t_3d_finished - frame.time_of_capture) * 1000
                         self.position_ready.emit(tracked_pos)
 
                         tracked_pos_with_empty_rotation = np.zeros(6)
                         tracked_pos_with_empty_rotation[:3] = tracked_pos
                         sock.sendto(tracked_pos_with_empty_rotation.tobytes(), (IP, PORT))
+
+                    self.stats_ready.emit(frame.fps, latency_arrival, latency_calc, latency_total)
 
     def stop(self):
         self.running = False
@@ -390,6 +411,10 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(self.centroid_label)
         self.pos_label = QtWidgets.QLabel("XYZ: N/A")
         controls_layout.addWidget(self.pos_label)
+        self.fps_label = QtWidgets.QLabel("FPS: N/A")
+        controls_layout.addWidget(self.fps_label)
+        self.latency_label = QtWidgets.QLabel("Latency: N/A")
+        controls_layout.addWidget(self.latency_label)
 
         # Right Panel: Visuals
         visuals_layout = QtWidgets.QVBoxLayout()
@@ -489,6 +514,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.frame_ready.connect(self.on_frame)
         self.worker.centroid_ready.connect(self.on_centroid)
         self.worker.position_ready.connect(self.on_position)
+        self.worker.stats_ready.connect(self.on_stats)
         self.worker.start()
 
     def update_exposure(self, val):
@@ -568,6 +594,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.curve_x.setData(self.data_x)
         self.curve_y.setData(self.data_y)
         self.curve_z.setData(self.data_z)
+
+    @QtCore.Slot(float, float, float, float)
+    def on_stats(self, fps, l_arrival, l_processing, l_total):
+        self.fps_label.setText(f"FPS: {fps:.1f}")
+        if l_processing >= 0:
+            self.latency_label.setText(f"Latency: Capture: {l_arrival:.1f}ms, Processing: {l_processing:.1f}ms, Total: {l_total:.1f}ms")
+        else:
+            self.latency_label.setText(f"Latency: Capture: {l_arrival:.1f}ms, Calc: N/A, Total: N/A")
 
     def closeEvent(self, event):
         self.worker.stop()

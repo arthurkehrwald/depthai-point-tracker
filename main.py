@@ -16,6 +16,7 @@ import pyqtgraph.opengl as gl
 CONFIG_FILE = "config.json"
 CAMERA_RESOLUTION = (1280, 720)
 
+
 def load_config():
     if Path(CONFIG_FILE).exists():
         try:
@@ -36,9 +37,11 @@ def load_config():
         "blob_min_inertia": 0.6
     }
 
+
 def save_config(config):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f)
+
 
 @dataclass(frozen=True)
 class CameraSocketParams:
@@ -129,11 +132,13 @@ class StereoCamera:
             left = message_group["left"]
             right = message_group["right"]
             if isinstance(left, dai.ImgFrame) and isinstance(right, dai.ImgFrame):
-                rect_l = cv2.remap(left.getCvFrame(), self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y, cv2.INTER_LINEAR)
-                rect_r = cv2.remap(right.getCvFrame(), self.cam_params_r.rectify_map_x, self.cam_params_r.rectify_map_y, cv2.INTER_LINEAR)
+                rect_l = cv2.remap(left.getCvFrame(), self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y,
+                                   cv2.INTER_LINEAR)
+                rect_r = cv2.remap(right.getCvFrame(), self.cam_params_r.rectify_map_x, self.cam_params_r.rectify_map_y,
+                                   cv2.INTER_LINEAR)
                 return True, rect_l, rect_r
         return False, None, None
-    
+
     def triangulate(
             self,
             point_l: typing.Tuple[float, float],
@@ -142,7 +147,8 @@ class StereoCamera:
         # cv.triangulatePoints operates on 2xN arrays of points
         points_l = np.array(point_l).reshape(2, 1)
         points_r = np.array(point_r).reshape(2, 1)
-        points4d: np.ndarray = cv2.triangulatePoints(self.cam_params_l.projection, self.cam_params_r.projection, points_l, points_r)
+        points4d: np.ndarray = cv2.triangulatePoints(self.cam_params_l.projection, self.cam_params_r.projection,
+                                                     points_l, points_r)
         first = points4d[:, 0]
         first = first[:3] / first[3]  # homogenous -> cartesian
         # OpenCV's camera coordinate convention defines +Y as pointing DOWN, but who tf does that.
@@ -154,6 +160,7 @@ class StereoCamera:
         msg.setManualExposure(exp_time, sens_iso)
         self.ctrl_q_l.send(msg)
         self.ctrl_q_r.send(msg)
+
 
 class BlobDetector:
     def __init__(self, config):
@@ -183,6 +190,7 @@ class BlobDetector:
             biggest = max(keypoints, key=lambda kp: kp.size).pt
             return True, biggest[0], biggest[1]
         return False, -1, -1
+
 
 class Worker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray, np.ndarray)
@@ -254,6 +262,7 @@ class Worker(QtCore.QThread):
     def stop(self):
         self.running = False
         self.wait()
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -438,10 +447,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # 3D View
         self.gl_view = gl.GLViewWidget()
         self.gl_view.setMinimumSize(400, 300)
-        grid = gl.GLGridItem(size=QtGui.QVector3D(100,100,1))
-        grid.setSpacing(10, 10, 10,)
+        grid = gl.GLGridItem(size=QtGui.QVector3D(100, 100, 1))
+        grid.setSpacing(10, 10, 10, )
         self.gl_view.addItem(grid)
-        self.pos_marker = gl.GLScatterPlotItem(pos=np.array([[0,0,0]]), color=(1,0,0,1), size=10)
+        self.pos_marker = gl.GLScatterPlotItem(pos=np.array([[0, 0, 0]]), color=(1, 0, 0, 1), size=10)
         self.gl_view.addItem(self.pos_marker)
         top_visuals.addWidget(self.gl_view, stretch=6)
 

@@ -21,7 +21,7 @@ RESOLUTION_MAP = {
     dai.MonoCameraProperties.SensorResolution.THE_400_P: (640, 400)
 }
 CAMERA_RESOLUTION_NUMERIC = RESOLUTION_MAP[CAMERA_RESOLUTION]
-CAMERA_FPS = 100
+CAMERA_FPS = 60
 
 
 def load_config():
@@ -58,27 +58,28 @@ class CameraSocketParams:
 
 
 @dataclass(frozen=True)
-class StereoFrame:
-    left: np.ndarray
-    right: np.ndarray
+class Frame:
+    cropped: np.ndarray
+    uncropped: np.ndarray
     frame_time: float
     time_of_capture: float
     time_of_arrival: float
-    ts_diff_us: float
 
 
 @dataclass(frozen=True)
 class CropRect:
-    center_x_01: float
-    center_y_01: float
-    w_01: float
-    h_01: float
+    x_min: float
+    y_min: float
+    x_max: float
+    y_max: float
 
 
 class MonoCamera:
     def __init__(self, pipeline: dai.Pipeline, socket: dai.CameraBoardSocket, name: str,
                  resolution: dai.MonoCameraProperties.SensorResolution, fps: int):
         self.resolution = resolution
+        self.numeric_resolution = RESOLUTION_MAP[resolution]
+        self.prev_frame_arrival_time = -1.0
 
         cam = pipeline.create(dai.node.MonoCamera)
         assert isinstance(cam, dai.node.MonoCamera)
@@ -88,7 +89,6 @@ class MonoCamera:
 
         manip = pipeline.create(dai.node.ImageManip)
         assert isinstance(manip, dai.node.ImageManip)
-        manip.initialConfig.setCropRect(.475, .475, .625, .625)
         manip.inputImage.setBlocking(False)
         manip.inputImage.setQueueSize(1)
         self.manip_ctrl = pipeline.create(dai.node.XLinkIn)
@@ -112,17 +112,47 @@ class MonoCamera:
         self.cam_ctrl.setStreamName(self.cam_ctrl_q_name)
         self.cam_ctrl.out.link(cam.inputControl)
 
+        self.rect_map_x = None
+        self.rect_map_y = None
+
+    def set_rectification_maps(self, rect_map_x: np.ndarray, rect_map_y: np.ndarray):
+        self.rect_map_x = rect_map_x
+        self.rect_map_y = rect_map_y
+
     def get_frame(self, device: dai.Device) -> dai.ImgFrame:
         frame = device.getOutputQueue(self.x_out_name).get()
         assert isinstance(frame, dai.ImgFrame)
         return frame
 
+    def process_frame(self, frame: dai.ImgFrame):
+        arrival_time = dai.Clock.now().total_seconds()
+        frame_time_ms = (arrival_time - self.prev_frame_arrival_time) * 1000
+        self.prev_frame_arrival_time = arrival_time
+        capture_time = frame.getTimestamp().total_seconds()
+        cv_frame = frame.getCvFrame()
+        uncropped = self.uncrop(frame.getCvFrame())
+        if self.rect_map_x is not None and self.rect_map_y is not None:
+            rect_uncropped = cv2.remap(uncropped, self.rect_map_x, self.rect_map_y,
+                                       cv2.INTER_LINEAR)
+        else:
+            print("WARNING: Rectification map not set. Will not rectify.")
+            rect_uncropped = uncropped
+        return Frame(cv_frame, rect_uncropped, frame_time_ms, capture_time, arrival_time)
+
+    def uncrop(self, cropped: np.ndarray) -> np.ndarray:
+        uncropped = np.zeros((self.numeric_resolution[1], self.numeric_resolution[0]), dtype=np.uint8)
+        h, w = cropped.shape[:2]
+        x_max = min(w, self.numeric_resolution[0])
+        y_max = min(h, self.numeric_resolution[1])
+        uncropped[0:y_max, 0:x_max] = cropped
+        return uncropped
+
     def set_crop(self, device: dai.Device, rect: CropRect):
         msg = dai.ImageManipConfig()
-        x_min = rect.center_x_01 - rect.w_01 * .5
-        y_min = rect.center_y_01 - rect.h_01 * .5
-        x_max = x_min + rect.w_01
-        y_max = y_min + rect.h_01
+        x_min = rect.x_min / self.numeric_resolution[0]
+        y_min = rect.y_min / self.numeric_resolution[1]
+        x_max = rect.x_max / self.numeric_resolution[0]
+        y_max = rect.y_max / self.numeric_resolution[1]
         msg.setCropRect(x_min, y_min, x_max, y_max)
         device.getInputQueue(self.manip_ctrl_q_name).send(msg)
 
@@ -142,7 +172,6 @@ class StereoCamera:
         self.resolution = resolution
         self.numeric_resolution = RESOLUTION_MAP[resolution]
         self.fps = fps
-        self.prev_frame_arrival_time = -1.0
 
     def __enter__(self) -> "StereoCamera":
         self.pipeline = dai.Pipeline()
@@ -150,6 +179,8 @@ class StereoCamera:
         self.cam_r = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_C, "right", self.resolution, self.fps)
         self.device = dai.Device(self.pipeline)
         self.cam_params_l, self.cam_params_r = self.compute_stereo_rectification()
+        self.cam_l.set_rectification_maps(self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y)
+        self.cam_r.set_rectification_maps(self.cam_params_r.rectify_map_x, self.cam_params_r.rectify_map_y)
         return self
 
     def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None,
@@ -158,6 +189,7 @@ class StereoCamera:
 
     def compute_stereo_rectification(self) -> typing.Tuple[CameraSocketParams, CameraSocketParams]:
         calibration = self.device.readCalibration()
+
         intrinsics_l = np.array(
             calibration.getCameraIntrinsics(
                 dai.CameraBoardSocket.CAM_B, self.numeric_resolution[0], self.numeric_resolution[1]
@@ -210,19 +242,16 @@ class StereoCamera:
         return (CameraSocketParams(projection_l, rectify_map_l_x, rectify_map_l_y),
                 CameraSocketParams(projection_r, rectify_map_r_x, rectify_map_r_y))
 
-    def get_stereo_frames(self) -> StereoFrame:
-        left = self.cam_l.get_frame(self.device)
-        right = self.cam_r.get_frame(self.device)
-        arrival_time = dai.Clock.now().total_seconds()
-        frame_time_ms = (arrival_time - self.prev_frame_arrival_time) * 1000
-        self.prev_frame_arrival_time = arrival_time
-        capture_time = left.getTimestamp().total_seconds()
-        ts_diff_us = abs((left.getTimestamp() - right.getTimestamp()).total_seconds()) * 1_000_000
-        rect_l = cv2.remap(left.getCvFrame(), self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y,
-                           cv2.INTER_LINEAR)
-        rect_r = cv2.remap(right.getCvFrame(), self.cam_params_r.rectify_map_x, self.cam_params_r.rectify_map_y,
-                           cv2.INTER_LINEAR)
-        return StereoFrame(rect_l, rect_r, frame_time_ms, capture_time, arrival_time, ts_diff_us)
+    def get_stereo_frames(self) -> typing.Tuple[Frame, Frame]:
+        # The frames are retrieved and processed in separate functions to make sure both
+        # frames are retrieved at the same time, since processing introduces a delay
+        # during which a new frame may arrive. Multithreading didn't work because
+        # of inconsistent scheduling.
+        raw_frame_l = self.cam_l.get_frame(self.device)
+        raw_frame_r = self.cam_r.get_frame(self.device)
+        frame_l = self.cam_l.process_frame(raw_frame_l)
+        frame_r = self.cam_r.process_frame(raw_frame_r)
+        return frame_l, frame_r
 
     def triangulate(
             self,
@@ -323,30 +352,31 @@ class Worker(QtCore.QThread):
                     blob_detector.update_params(self.blob_params)
                     self.blob_settings_changed = False
 
-                frame = stereo_cam.get_stereo_frames()
+                frame_l, frame_r = stereo_cam.get_stereo_frames()
 
-                s_l, cX_l, cY_l = blob_detector.try_detect(frame.left)
-                s_r, cX_r, cY_r = blob_detector.try_detect(frame.right)
+                s_l, cX_l, cY_l = blob_detector.try_detect(frame_l.uncropped)
+                s_r, cX_r, cY_r = blob_detector.try_detect(frame_r.uncropped)
 
-                self.frame_ready.emit(frame.left.copy(), frame.right.copy())
+                self.frame_ready.emit(frame_l.uncropped.copy(), frame_r.uncropped.copy())
                 self.centroid_ready.emit(cX_l, cY_l, s_l, cX_r, cY_r, s_r)
 
-                latency_arrival = (frame.time_of_arrival - frame.time_of_capture) * 1000
+                latency_arrival = (frame_l.time_of_arrival - frame_l.time_of_capture) * 1000
+                ts_diff_us = abs(frame_l.time_of_capture - frame_r.time_of_capture) * 1_000_000
                 latency_calc = -1.0
                 latency_total = -1.0
 
                 if s_l and s_r:
                     tracked_pos = stereo_cam.triangulate((cX_l, cY_l), (cX_r, cY_r))
                     t_3d_finished = dai.Clock.now().total_seconds()
-                    latency_calc = (t_3d_finished - frame.time_of_arrival) * 1000
-                    latency_total = (t_3d_finished - frame.time_of_capture) * 1000
+                    latency_calc = (t_3d_finished - frame_l.time_of_arrival) * 1000
+                    latency_total = (t_3d_finished - frame_l.time_of_capture) * 1000
                     self.position_ready.emit(tracked_pos)
 
                     tracked_pos_with_empty_rotation = np.zeros(6)
                     tracked_pos_with_empty_rotation[:3] = tracked_pos
                     sock.sendto(tracked_pos_with_empty_rotation.tobytes(), (IP, PORT))
 
-                self.stats_ready.emit(frame.frame_time, latency_arrival, latency_calc, latency_total, frame.ts_diff_us)
+                self.stats_ready.emit(frame_l.frame_time, latency_arrival, latency_calc, latency_total, ts_diff_us)
 
     def stop(self):
         self.running = False

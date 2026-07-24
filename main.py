@@ -112,11 +112,10 @@ class MonoCamera:
         self.cam_ctrl.setStreamName(self.cam_ctrl_q_name)
         self.cam_ctrl.out.link(cam.inputControl)
 
-    def try_get_frame(self, device: dai.Device) -> typing.Tuple[bool, dai.ImgFrame | None]:
+    def get_frame(self, device: dai.Device) -> dai.ImgFrame:
         frame = device.getOutputQueue(self.x_out_name).get()
-        if isinstance(frame, dai.ImgFrame):
-            return True, frame
-        return False, None
+        assert isinstance(frame, dai.ImgFrame)
+        return frame
 
     def set_crop(self, device: dai.Device, rect: CropRect):
         msg = dai.ImageManipConfig()
@@ -211,21 +210,19 @@ class StereoCamera:
         return (CameraSocketParams(projection_l, rectify_map_l_x, rectify_map_l_y),
                 CameraSocketParams(projection_r, rectify_map_r_x, rectify_map_r_y))
 
-    def try_get_stereo_frames(self) -> typing.Tuple[bool, StereoFrame | None]:
-        success_l, left = self.cam_l.try_get_frame(self.device)
-        success_r, right = self.cam_r.try_get_frame(self.device)
-        if success_l and success_r and left is not None and right is not None:
-            arrival_time = dai.Clock.now().total_seconds()
-            frame_time_ms = (arrival_time - self.prev_frame_arrival_time) * 1000
-            self.prev_frame_arrival_time = arrival_time
-            capture_time = left.getTimestamp().total_seconds()
-            ts_diff_us = abs((left.getTimestamp() - right.getTimestamp()).total_seconds()) * 1_000_000
-            rect_l = cv2.remap(left.getCvFrame(), self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y,
-                               cv2.INTER_LINEAR)
-            rect_r = cv2.remap(right.getCvFrame(), self.cam_params_r.rectify_map_x, self.cam_params_r.rectify_map_y,
-                               cv2.INTER_LINEAR)
-            return True, StereoFrame(rect_l, rect_r, frame_time_ms, capture_time, arrival_time, ts_diff_us)
-        return False, None
+    def get_stereo_frames(self) -> StereoFrame:
+        left = self.cam_l.get_frame(self.device)
+        right = self.cam_r.get_frame(self.device)
+        arrival_time = dai.Clock.now().total_seconds()
+        frame_time_ms = (arrival_time - self.prev_frame_arrival_time) * 1000
+        self.prev_frame_arrival_time = arrival_time
+        capture_time = left.getTimestamp().total_seconds()
+        ts_diff_us = abs((left.getTimestamp() - right.getTimestamp()).total_seconds()) * 1_000_000
+        rect_l = cv2.remap(left.getCvFrame(), self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y,
+                           cv2.INTER_LINEAR)
+        rect_r = cv2.remap(right.getCvFrame(), self.cam_params_r.rectify_map_x, self.cam_params_r.rectify_map_y,
+                           cv2.INTER_LINEAR)
+        return StereoFrame(rect_l, rect_r, frame_time_ms, capture_time, arrival_time, ts_diff_us)
 
     def triangulate(
             self,
@@ -276,7 +273,7 @@ class BlobDetector:
         params.minInertiaRatio = config.get("blob_min_inertia", 0.6)
         self.detector = cv2.SimpleBlobDetector.create(params)
 
-    def detect(self, img: cv2.typing.MatLike) -> typing.Tuple[bool, float, float]:
+    def try_detect(self, img: cv2.typing.MatLike) -> typing.Tuple[bool, float, float]:
         keypoints = self.detector.detect(img)
         if keypoints:
             biggest = max(keypoints, key=lambda kp: kp.size).pt
@@ -326,31 +323,30 @@ class Worker(QtCore.QThread):
                     blob_detector.update_params(self.blob_params)
                     self.blob_settings_changed = False
 
-                success, frame = stereo_cam.try_get_stereo_frames()
+                frame = stereo_cam.get_stereo_frames()
 
-                if success and frame is not None:
-                    s_l, cX_l, cY_l = blob_detector.detect(frame.left)
-                    s_r, cX_r, cY_r = blob_detector.detect(frame.right)
+                s_l, cX_l, cY_l = blob_detector.try_detect(frame.left)
+                s_r, cX_r, cY_r = blob_detector.try_detect(frame.right)
 
-                    self.frame_ready.emit(frame.left.copy(), frame.right.copy())
-                    self.centroid_ready.emit(cX_l, cY_l, s_l, cX_r, cY_r, s_r)
+                self.frame_ready.emit(frame.left.copy(), frame.right.copy())
+                self.centroid_ready.emit(cX_l, cY_l, s_l, cX_r, cY_r, s_r)
 
-                    latency_arrival = (frame.time_of_arrival - frame.time_of_capture) * 1000
-                    latency_calc = -1.0
-                    latency_total = -1.0
+                latency_arrival = (frame.time_of_arrival - frame.time_of_capture) * 1000
+                latency_calc = -1.0
+                latency_total = -1.0
 
-                    if s_l and s_r:
-                        tracked_pos = stereo_cam.triangulate((cX_l, cY_l), (cX_r, cY_r))
-                        t_3d_finished = dai.Clock.now().total_seconds()
-                        latency_calc = (t_3d_finished - frame.time_of_arrival) * 1000
-                        latency_total = (t_3d_finished - frame.time_of_capture) * 1000
-                        self.position_ready.emit(tracked_pos)
+                if s_l and s_r:
+                    tracked_pos = stereo_cam.triangulate((cX_l, cY_l), (cX_r, cY_r))
+                    t_3d_finished = dai.Clock.now().total_seconds()
+                    latency_calc = (t_3d_finished - frame.time_of_arrival) * 1000
+                    latency_total = (t_3d_finished - frame.time_of_capture) * 1000
+                    self.position_ready.emit(tracked_pos)
 
-                        tracked_pos_with_empty_rotation = np.zeros(6)
-                        tracked_pos_with_empty_rotation[:3] = tracked_pos
-                        sock.sendto(tracked_pos_with_empty_rotation.tobytes(), (IP, PORT))
+                    tracked_pos_with_empty_rotation = np.zeros(6)
+                    tracked_pos_with_empty_rotation[:3] = tracked_pos
+                    sock.sendto(tracked_pos_with_empty_rotation.tobytes(), (IP, PORT))
 
-                    self.stats_ready.emit(frame.frame_time, latency_arrival, latency_calc, latency_total, frame.ts_diff_us)
+                self.stats_ready.emit(frame.frame_time, latency_arrival, latency_calc, latency_total, frame.ts_diff_us)
 
     def stop(self):
         self.running = False

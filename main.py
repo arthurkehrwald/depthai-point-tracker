@@ -15,6 +15,7 @@ import pyqtgraph.opengl as gl
 
 CONFIG_FILE = "config.json"
 CAMERA_RESOLUTION = (1280, 720)
+CAMERA_FPS = 60
 
 
 def load_config():
@@ -61,9 +62,10 @@ class StereoFrame:
 
 class StereoCamera:
     def __init__(
-            self, resolution: typing.Tuple[int, int]
+            self, resolution: typing.Tuple[int, int], fps: int
     ):
         self.resolution = resolution
+        self.fps = fps
 
     def __enter__(self) -> "StereoCamera":
         self.pipeline = dai.Pipeline()
@@ -71,17 +73,17 @@ class StereoCamera:
 
         sync = self.pipeline.create(dai.node.Sync)
         sync.setRunOnHost(True)
-        cam_l = self.pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
-        cam_l.requestOutput(self.resolution).link(sync.inputs["left"])
-        cam_r = self.pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
-        cam_r.requestOutput(self.resolution).link(sync.inputs["right"])
-        self.synced_q = sync.out.createOutputQueue()
-
-        control_in_l = cam_l.inputControl
-        self.ctrl_q_l = control_in_l.createInputQueue()
-        control_in_r = cam_r.inputControl
-        self.ctrl_q_r = control_in_r.createInputQueue()
+        self.ctrl_q_l = self.add_camera(dai.CameraBoardSocket.CAM_B, "left", sync)
+        self.ctrl_q_r = self.add_camera(dai.CameraBoardSocket.CAM_C, "right", sync)
+        self.synced_q = sync.out.createOutputQueue(maxSize=1, blocking=False)
         return self
+
+    def add_camera(self, socket: dai.CameraBoardSocket, name: str, sync: dai.node.Sync) -> dai.InputQueue:
+        cam = self.pipeline.create(dai.node.Camera).build(socket, self.resolution, self.fps)
+        cam.requestOutput(self.resolution).link(sync.inputs[name])
+        sync.inputs[name].setBlocking(False)
+        sync.inputs[name].setMaxSize(1)
+        return cam.inputControl.createInputQueue()
 
     def start(self):
         self.pipeline.start()
@@ -237,7 +239,7 @@ class Worker(QtCore.QThread):
         self.blob_settings_changed = True
 
     def run(self):
-        with StereoCamera(CAMERA_RESOLUTION) as stereo_cam:
+        with StereoCamera(CAMERA_RESOLUTION, CAMERA_FPS) as stereo_cam:
             blob_detector = BlobDetector(self.blob_params)
 
             IP = "127.0.0.1"

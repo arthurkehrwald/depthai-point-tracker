@@ -75,14 +75,16 @@ class CropRect:
 
 
 class MonoCamera:
-    def __init__(self, pipeline: dai.Pipeline, socket: dai.CameraBoardSocket, name: str, sync: dai.node.Sync,
+    def __init__(self, pipeline: dai.Pipeline, socket: dai.CameraBoardSocket, name: str,
                  resolution: dai.MonoCameraProperties.SensorResolution, fps: int):
         self.resolution = resolution
+
         cam = pipeline.create(dai.node.MonoCamera)
         assert isinstance(cam, dai.node.MonoCamera)
         cam.setBoardSocket(socket)
         cam.setFps(fps)
         cam.setResolution(resolution)
+
         manip = pipeline.create(dai.node.ImageManip)
         assert isinstance(manip, dai.node.ImageManip)
         manip.initialConfig.setCropRect(.475, .475, .625, .625)
@@ -94,14 +96,26 @@ class MonoCamera:
         self.manip_ctrl.setStreamName(self.manip_ctrl_q_name)
         self.manip_ctrl.out.link(manip.inputConfig)
         cam.out.link(manip.inputImage)
-        manip.out.link(sync.inputs[name])
-        sync.inputs[name].setBlocking(False)
-        sync.inputs[name].setQueueSize(1)
+
+        x_out = pipeline.create(dai.node.XLinkOut)
+        assert isinstance(x_out, dai.node.XLinkOut)
+        self.x_out_name = f"{name}_x_out"
+        x_out.setStreamName(self.x_out_name)
+        x_out.input.setBlocking(False)
+        x_out.input.setQueueSize(1)
+        manip.out.link(x_out.input)
+
         self.cam_ctrl = pipeline.create(dai.node.XLinkIn)
         assert isinstance(self.cam_ctrl, dai.node.XLinkIn)
         self.cam_ctrl_q_name = f"{name}_cam_control"
         self.cam_ctrl.setStreamName(self.cam_ctrl_q_name)
         self.cam_ctrl.out.link(cam.inputControl)
+
+    def try_get_frame(self, device: dai.Device) -> typing.Tuple[bool, dai.ImgFrame | None]:
+        frame = device.getOutputQueue(self.x_out_name).get()
+        if isinstance(frame, dai.ImgFrame):
+            return True, frame
+        return False, None
 
     def set_crop(self, device: dai.Device, rect: CropRect):
         msg = dai.ImageManipConfig()
@@ -131,17 +145,8 @@ class StereoCamera:
 
     def __enter__(self) -> "StereoCamera":
         self.pipeline = dai.Pipeline()
-        sync = self.pipeline.create(dai.node.Sync)
-        assert isinstance(sync, dai.node.Sync)
-        self.cam_l = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_B, "left", sync, self.resolution, self.fps)
-        self.cam_r = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_C, "right", sync, self.resolution, self.fps)
-        x_out_sync = self.pipeline.create(dai.node.XLinkOut)
-        assert isinstance(x_out_sync, dai.node.XLinkOut)
-        self.x_out_stream_name = "x_out"
-        x_out_sync.setStreamName(self.x_out_stream_name)
-        sync.out.link(x_out_sync.input)
-        x_out_sync.input.setBlocking(False)
-        x_out_sync.input.setQueueSize(1)
+        self.cam_l = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_B, "left", self.resolution, self.fps)
+        self.cam_r = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_C, "right", self.resolution, self.fps)
         self.device = dai.Device(self.pipeline)
         self.cam_params_l, self.cam_params_r = self.compute_stereo_rectification()
         return self
@@ -205,19 +210,17 @@ class StereoCamera:
                 CameraSocketParams(projection_r, rectify_map_r_x, rectify_map_r_y))
 
     def try_get_stereo_frames(self) -> typing.Tuple[bool, StereoFrame | None]:
-        message_group = self.device.getOutputQueue(self.x_out_stream_name).get()
+        success_l, left = self.cam_l.try_get_frame(self.device)
+        success_r, right = self.cam_r.try_get_frame(self.device)
         arrival_time = dai.Clock.now().total_seconds()
-        if isinstance(message_group, dai.MessageGroup):
-            left = message_group["left"]
-            right = message_group["right"]
-            if isinstance(left, dai.ImgFrame) and isinstance(right, dai.ImgFrame):
-                fps = self.fps
-                capture_time = left.getTimestamp().total_seconds()
-                rect_l = cv2.remap(left.getCvFrame(), self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y,
-                                   cv2.INTER_LINEAR)
-                rect_r = cv2.remap(right.getCvFrame(), self.cam_params_r.rectify_map_x, self.cam_params_r.rectify_map_y,
-                                   cv2.INTER_LINEAR)
-                return True, StereoFrame(rect_l, rect_r, fps, capture_time, arrival_time)
+        if success_l and success_r and left is not None and right is not None:
+            fps = self.fps
+            capture_time = left.getTimestamp().total_seconds()
+            rect_l = cv2.remap(left.getCvFrame(), self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y,
+                               cv2.INTER_LINEAR)
+            rect_r = cv2.remap(right.getCvFrame(), self.cam_params_r.rectify_map_x, self.cam_params_r.rectify_map_y,
+                               cv2.INTER_LINEAR)
+            return True, StereoFrame(rect_l, rect_r, fps, capture_time, arrival_time)
         return False, None
 
     def triangulate(

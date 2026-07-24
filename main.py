@@ -13,7 +13,6 @@ from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 
-
 CONFIG_FILE = "config.json"
 CAMERA_RESOLUTION = (1280, 720)
 
@@ -49,6 +48,7 @@ class CameraSocketParams:
     projection: np.ndarray
     rectify_map_x: np.ndarray
     rectify_map_y: np.ndarray
+
 
 @dataclass(frozen=True)
 class StereoFrame:
@@ -86,7 +86,8 @@ class StereoCamera:
     def start(self):
         self.pipeline.start()
 
-    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None):
+    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None,
+                 exc_tb: TracebackType | None):
         self.pipeline.stop()
 
     def compute_stereo_rectification(self) -> typing.Tuple[CameraSocketParams, CameraSocketParams]:
@@ -207,7 +208,7 @@ class BlobDetector:
         if keypoints:
             biggest = max(keypoints, key=lambda kp: kp.size).pt
             img_height = np.shape(img)[0]
-            return True, biggest[0], (biggest[1] - img_height) * -1 # Move origin from top to bottom
+            return True, biggest[0], (biggest[1] - img_height) * -1  # Move origin from top to bottom
         return False, -1, -1
 
 
@@ -599,7 +600,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_stats(self, fps, l_arrival, l_processing, l_total):
         self.fps_label.setText(f"FPS: {fps:.1f}")
         if l_processing >= 0:
-            self.latency_label.setText(f"Latency: Capture: {l_arrival:.1f}ms, Processing: {l_processing:.1f}ms, Total: {l_total:.1f}ms")
+            self.latency_label.setText(
+                f"Latency: Capture: {l_arrival:.1f}ms, Processing: {l_processing:.1f}ms, Total: {l_total:.1f}ms")
         else:
             self.latency_label.setText(f"Latency: Capture: {l_arrival:.1f}ms, Calc: N/A, Total: N/A")
 

@@ -14,8 +14,14 @@ import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 
 CONFIG_FILE = "config.json"
-CAMERA_RESOLUTION = (1280, 720)
-CAMERA_FPS = 60
+CAMERA_RESOLUTION = dai.MonoCameraProperties.SensorResolution.THE_720_P
+RESOLUTION_MAP = {
+    dai.MonoCameraProperties.SensorResolution.THE_800_P: (1280, 800),
+    dai.MonoCameraProperties.SensorResolution.THE_720_P: (1280, 720),
+    dai.MonoCameraProperties.SensorResolution.THE_400_P: (640, 400)
+}
+CAMERA_RESOLUTION_NUMERIC = RESOLUTION_MAP[CAMERA_RESOLUTION]
+CAMERA_FPS = 100
 
 
 def load_config():
@@ -70,73 +76,90 @@ class CropRect:
 
 class MonoCamera:
     def __init__(self, pipeline: dai.Pipeline, socket: dai.CameraBoardSocket, name: str, sync: dai.node.Sync,
-                 resolution: typing.Tuple[int, int], fps: int):
+                 resolution: dai.MonoCameraProperties.SensorResolution, fps: int):
         self.resolution = resolution
-        cam = pipeline.create(dai.node.Camera).build(socket)
+        cam = pipeline.create(dai.node.MonoCamera)
+        assert isinstance(cam, dai.node.MonoCamera)
+        cam.setBoardSocket(socket)
+        cam.setFps(fps)
+        cam.setResolution(resolution)
         manip = pipeline.create(dai.node.ImageManip)
-        manip.initialConfig.addCrop(640, 360, 320, 180)
+        assert isinstance(manip, dai.node.ImageManip)
+        manip.initialConfig.setCropRect(.475, .475, .625, .625)
         manip.inputImage.setBlocking(False)
-        manip.inputImage.setMaxSize(1)
-        self.manip_ctrl = manip.inputConfig.createInputQueue()
-        cam.requestOutput(resolution, fps=fps).link(manip.inputImage)
+        manip.inputImage.setQueueSize(1)
+        self.manip_ctrl = pipeline.create(dai.node.XLinkIn)
+        assert isinstance(self.manip_ctrl, dai.node.XLinkIn)
+        self.manip_ctrl_q_name = f"{name}_manip_control"
+        self.manip_ctrl.setStreamName(self.manip_ctrl_q_name)
+        self.manip_ctrl.out.link(manip.inputConfig)
+        cam.out.link(manip.inputImage)
         manip.out.link(sync.inputs[name])
         sync.inputs[name].setBlocking(False)
-        sync.inputs[name].setMaxSize(1)
-        self.cam_ctrl = cam.inputControl.createInputQueue()
+        sync.inputs[name].setQueueSize(1)
+        self.cam_ctrl = pipeline.create(dai.node.XLinkIn)
+        assert isinstance(self.cam_ctrl, dai.node.XLinkIn)
+        self.cam_ctrl_q_name = f"{name}_cam_control"
+        self.cam_ctrl.setStreamName(self.cam_ctrl_q_name)
+        self.cam_ctrl.out.link(cam.inputControl)
 
-    def set_crop(self, rect: CropRect):
+    def set_crop(self, device: dai.Device, rect: CropRect):
         msg = dai.ImageManipConfig()
-        x = int((rect.center_x_01 - rect.w_01 * .5) * self.resolution[0])
-        y = int((rect.center_y_01 - rect.h_01 * .5) * self.resolution[1])
-        w = int(rect.w_01 * self.resolution[0])
-        h = int(rect.h_01 * self.resolution[1])
-        msg.addCrop(x, y, w, h)
-        self.manip_ctrl.send(msg)
+        x_min = rect.center_x_01 - rect.w_01 * .5
+        y_min = rect.center_y_01 - rect.h_01 * .5
+        x_max = x_min + rect.w_01
+        y_max = y_min + rect.h_01
+        msg.setCropRect(x_min, y_min, x_max, y_max)
+        device.getInputQueue(self.manip_ctrl_q_name).send(msg)
 
-    def unset_crop(self):
-        self.set_crop(CropRect(0.5, 0.5, 1, 1))
+    def unset_crop(self, device: dai.Device):
+        self.set_crop(device, CropRect(0.5, 0.5, 1, 1))
 
-    def set_exposure(self, exp_time: int, sens_iso: int) -> None:
+    def set_exposure(self, device: dai.Device, exp_time: int, sens_iso: int) -> None:
         msg = dai.CameraControl()
         msg.setManualExposure(exp_time, sens_iso)
-        self.cam_ctrl.send(msg)
+        device.getInputQueue(self.cam_ctrl_q_name).send(msg)
 
 
 class StereoCamera:
     def __init__(
-            self, resolution: typing.Tuple[int, int], fps: int
+            self, resolution: dai.MonoCameraProperties.SensorResolution, fps: int
     ):
         self.resolution = resolution
+        self.numeric_resolution = RESOLUTION_MAP[resolution]
         self.fps = fps
 
     def __enter__(self) -> "StereoCamera":
         self.pipeline = dai.Pipeline()
-        self.cam_params_l, self.cam_params_r = self.compute_stereo_rectification()
-
         sync = self.pipeline.create(dai.node.Sync)
-        sync.setRunOnHost(True)
+        assert isinstance(sync, dai.node.Sync)
         self.cam_l = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_B, "left", sync, self.resolution, self.fps)
         self.cam_r = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_C, "right", sync, self.resolution, self.fps)
-        self.synced_q = sync.out.createOutputQueue(maxSize=1, blocking=False)
+        x_out_sync = self.pipeline.create(dai.node.XLinkOut)
+        assert isinstance(x_out_sync, dai.node.XLinkOut)
+        self.x_out_stream_name = "x_out"
+        x_out_sync.setStreamName(self.x_out_stream_name)
+        sync.out.link(x_out_sync.input)
+        x_out_sync.input.setBlocking(False)
+        x_out_sync.input.setQueueSize(1)
+        self.device = dai.Device(self.pipeline)
+        self.cam_params_l, self.cam_params_r = self.compute_stereo_rectification()
         return self
-
-    def start(self):
-        self.pipeline.start()
 
     def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None,
                  exc_tb: TracebackType | None):
-        self.pipeline.stop()
+        self.device.close()
 
     def compute_stereo_rectification(self) -> typing.Tuple[CameraSocketParams, CameraSocketParams]:
-        calibration = self.pipeline.getDefaultDevice().readCalibration()
+        calibration = self.device.readCalibration()
         intrinsics_l = np.array(
             calibration.getCameraIntrinsics(
-                dai.CameraBoardSocket.CAM_B, self.resolution[0], self.resolution[1]
+                dai.CameraBoardSocket.CAM_B, self.numeric_resolution[0], self.numeric_resolution[1]
             ),
         )
         intrinsics_r = np.array(
             calibration.getCameraIntrinsics(
-                dai.CameraBoardSocket.CAM_C, self.resolution[0], self.resolution[1]
+                dai.CameraBoardSocket.CAM_C, self.numeric_resolution[0], self.numeric_resolution[1]
             ),
         )
 
@@ -158,7 +181,7 @@ class StereoCamera:
         rotation_l, rotation_r, projection_l, projection_r, _, _, _ = cv2.stereoRectify(
             intrinsics_l, distortion_l.flatten(),
             intrinsics_r, distortion_r.flatten(),
-            imageSize=self.resolution,
+            imageSize=self.numeric_resolution,
             R=l_to_r_rotation,
             T=l_to_r_translation,
             flags=cv2.CALIB_ZERO_DISPARITY,
@@ -168,13 +191,13 @@ class StereoCamera:
         rectify_map_l_x, rectify_map_l_y = cv2.initUndistortRectifyMap(
             intrinsics_l, distortion_l,
             rotation_l, projection_l,
-            self.resolution,
+            self.numeric_resolution,
             cv2.CV_16SC2
         )
         rectify_map_r_x, rectify_map_r_y = cv2.initUndistortRectifyMap(
             intrinsics_r, distortion_r,
             rotation_r, projection_r,
-            self.resolution,
+            self.numeric_resolution,
             cv2.CV_16SC2
         )
 
@@ -182,13 +205,13 @@ class StereoCamera:
                 CameraSocketParams(projection_r, rectify_map_r_x, rectify_map_r_y))
 
     def try_get_stereo_frames(self) -> typing.Tuple[bool, StereoFrame | None]:
-        message_group = self.synced_q.get()
+        message_group = self.device.getOutputQueue(self.x_out_stream_name).get()
         arrival_time = dai.Clock.now().total_seconds()
         if isinstance(message_group, dai.MessageGroup):
             left = message_group["left"]
             right = message_group["right"]
             if isinstance(left, dai.ImgFrame) and isinstance(right, dai.ImgFrame):
-                fps = left.getFps()
+                fps = self.fps
                 capture_time = left.getTimestamp().total_seconds()
                 rect_l = cv2.remap(left.getCvFrame(), self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y,
                                    cv2.INTER_LINEAR)
@@ -212,16 +235,16 @@ class StereoCamera:
         return first
 
     def set_exposure(self, exp_time: int, sens_iso: int) -> None:
-        self.cam_l.set_exposure(exp_time, sens_iso)
-        self.cam_r.set_exposure(exp_time, sens_iso)
+        self.cam_l.set_exposure(self.device, exp_time, sens_iso)
+        self.cam_r.set_exposure(self.device, exp_time, sens_iso)
 
     def set_crop(self, rect_l: CropRect, rect_r: CropRect):
-        self.cam_l.set_crop(rect_l)
-        self.cam_r.set_crop(rect_r)
+        self.cam_l.set_crop(self.device, rect_l)
+        self.cam_r.set_crop(self.device, rect_r)
 
     def unset_crop(self):
-        self.cam_l.unset_crop()
-        self.cam_r.unset_crop()
+        self.cam_l.unset_crop(self.device)
+        self.cam_r.unset_crop(self.device)
 
 
 class BlobDetector:
@@ -286,9 +309,6 @@ class Worker(QtCore.QThread):
             IP = "127.0.0.1"
             PORT = 4241
             sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-            stereo_cam.start()
-            #stereo_cam.set_crop(CropRect(.5, .5, .25, .25), CropRect(.5, .5, .25, .25))
 
             while self.running:
                 if self.settings_changed:
@@ -504,7 +524,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # left and right previews have the same shape/aspect ratio right from
         # startup (before any real frame has been received from the worker),
         # and lock their views together so they always stay in sync.
-        blank_w, blank_h = CAMERA_RESOLUTION
+        blank_w, blank_h = CAMERA_RESOLUTION_NUMERIC
         blank_frame = np.zeros((blank_w, blank_h), dtype=np.uint8)
         self.img_item_l.setImage(blank_frame)
         self.img_item_r.setImage(blank_frame)

@@ -61,9 +61,10 @@ class CameraSocketParams:
 class StereoFrame:
     left: np.ndarray
     right: np.ndarray
-    fps: float
+    frame_time: float
     time_of_capture: float
     time_of_arrival: float
+    ts_diff_us: float
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,7 @@ class StereoCamera:
         self.resolution = resolution
         self.numeric_resolution = RESOLUTION_MAP[resolution]
         self.fps = fps
+        self.prev_frame_arrival_time = -1.0
 
     def __enter__(self) -> "StereoCamera":
         self.pipeline = dai.Pipeline()
@@ -212,15 +214,17 @@ class StereoCamera:
     def try_get_stereo_frames(self) -> typing.Tuple[bool, StereoFrame | None]:
         success_l, left = self.cam_l.try_get_frame(self.device)
         success_r, right = self.cam_r.try_get_frame(self.device)
-        arrival_time = dai.Clock.now().total_seconds()
         if success_l and success_r and left is not None and right is not None:
-            fps = self.fps
+            arrival_time = dai.Clock.now().total_seconds()
+            frame_time_ms = (arrival_time - self.prev_frame_arrival_time) * 1000
+            self.prev_frame_arrival_time = arrival_time
             capture_time = left.getTimestamp().total_seconds()
+            ts_diff_us = abs((left.getTimestamp() - right.getTimestamp()).total_seconds()) * 1_000_000
             rect_l = cv2.remap(left.getCvFrame(), self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y,
                                cv2.INTER_LINEAR)
             rect_r = cv2.remap(right.getCvFrame(), self.cam_params_r.rectify_map_x, self.cam_params_r.rectify_map_y,
                                cv2.INTER_LINEAR)
-            return True, StereoFrame(rect_l, rect_r, fps, capture_time, arrival_time)
+            return True, StereoFrame(rect_l, rect_r, frame_time_ms, capture_time, arrival_time, ts_diff_us)
         return False, None
 
     def triangulate(
@@ -285,7 +289,7 @@ class Worker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray, np.ndarray)
     centroid_ready = QtCore.Signal(float, float, bool, float, float, bool)
     position_ready = QtCore.Signal(np.ndarray)
-    stats_ready = QtCore.Signal(float, float, float, float)
+    stats_ready = QtCore.Signal(float, float, float, float, float)
 
     def __init__(self, config):
         super().__init__()
@@ -346,7 +350,7 @@ class Worker(QtCore.QThread):
                         tracked_pos_with_empty_rotation[:3] = tracked_pos
                         sock.sendto(tracked_pos_with_empty_rotation.tobytes(), (IP, PORT))
 
-                    self.stats_ready.emit(frame.fps, latency_arrival, latency_calc, latency_total)
+                    self.stats_ready.emit(frame.frame_time, latency_arrival, latency_calc, latency_total, frame.ts_diff_us)
 
     def stop(self):
         self.running = False
@@ -479,10 +483,19 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(self.centroid_label)
         self.pos_label = QtWidgets.QLabel("XYZ: N/A")
         controls_layout.addWidget(self.pos_label)
-        self.fps_label = QtWidgets.QLabel("FPS: N/A")
-        controls_layout.addWidget(self.fps_label)
-        self.latency_label = QtWidgets.QLabel("Latency: N/A")
-        controls_layout.addWidget(self.latency_label)
+
+        controls_layout.addSpacing(10)
+        controls_layout.addWidget(QtWidgets.QLabel("<b>Timing Info</b>"))
+        self.frame_time_label = QtWidgets.QLabel("Frame time: N/A")
+        controls_layout.addWidget(self.frame_time_label)
+        self.capture_latency_label = QtWidgets.QLabel("Capture latency: N/A")
+        controls_layout.addWidget(self.capture_latency_label)
+        self.processing_latency_label = QtWidgets.QLabel("Processing latency: N/A")
+        controls_layout.addWidget(self.processing_latency_label)
+        self.total_latency_label = QtWidgets.QLabel("Total latency: N/A")
+        controls_layout.addWidget(self.total_latency_label)
+        self.lr_diff_label = QtWidgets.QLabel("L-R frame diff: N/A")
+        controls_layout.addWidget(self.lr_diff_label)
 
         # Right Panel: Visuals
         visuals_layout = QtWidgets.QVBoxLayout()
@@ -663,14 +676,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.curve_y.setData(self.data_y)
         self.curve_z.setData(self.data_z)
 
-    @QtCore.Slot(float, float, float, float)
-    def on_stats(self, fps, l_arrival, l_processing, l_total):
-        self.fps_label.setText(f"FPS: {fps:.1f}")
+    @QtCore.Slot(float, float, float, float, float)
+    def on_stats(self, frame_time, l_arrival, l_processing, l_total, ts_diff):
+        fps = float(1000.0 / frame_time)
+        self.frame_time_label.setText(f"Frame time: {frame_time:.1f}ms ({fps:.1f} FPS)")
+        self.capture_latency_label.setText(f"Capture latency: {l_arrival:.1f}ms")
         if l_processing >= 0:
-            self.latency_label.setText(
-                f"Latency: Capture: {l_arrival:.1f}ms, Processing: {l_processing:.1f}ms, Total: {l_total:.1f}ms")
+            self.processing_latency_label.setText(f"Processing latency: {l_processing:.1f}ms")
+            self.total_latency_label.setText(f"Total latency: {l_total:.1f}ms")
         else:
-            self.latency_label.setText(f"Latency: Capture: {l_arrival:.1f}ms, Calc: N/A, Total: N/A")
+            self.processing_latency_label.setText("Processing latency: N/A")
+            self.total_latency_label.setText("Total latency: N/A")
+        self.lr_diff_label.setText(f"L-R frame diff: {ts_diff:.1f}µs")
 
     def closeEvent(self, event):
         self.worker.stop()

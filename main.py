@@ -60,6 +60,48 @@ class StereoFrame:
     time_of_arrival: float
 
 
+@dataclass(frozen=True)
+class CropRect:
+    center_x_01: float
+    center_y_01: float
+    w_01: float
+    h_01: float
+
+
+class MonoCamera:
+    def __init__(self, pipeline: dai.Pipeline, socket: dai.CameraBoardSocket, name: str, sync: dai.node.Sync,
+                 resolution: typing.Tuple[int, int], fps: int):
+        self.resolution = resolution
+        cam = pipeline.create(dai.node.Camera).build(socket)
+        manip = pipeline.create(dai.node.ImageManip)
+        manip.initialConfig.addCrop(640, 360, 320, 180)
+        manip.inputImage.setBlocking(False)
+        manip.inputImage.setMaxSize(1)
+        self.manip_ctrl = manip.inputConfig.createInputQueue()
+        cam.requestOutput(resolution, fps=fps).link(manip.inputImage)
+        manip.out.link(sync.inputs[name])
+        sync.inputs[name].setBlocking(False)
+        sync.inputs[name].setMaxSize(1)
+        self.cam_ctrl = cam.inputControl.createInputQueue()
+
+    def set_crop(self, rect: CropRect):
+        msg = dai.ImageManipConfig()
+        x = int((rect.center_x_01 - rect.w_01 * .5) * self.resolution[0])
+        y = int((rect.center_y_01 - rect.h_01 * .5) * self.resolution[1])
+        w = int(rect.w_01 * self.resolution[0])
+        h = int(rect.h_01 * self.resolution[1])
+        msg.addCrop(x, y, w, h)
+        self.manip_ctrl.send(msg)
+
+    def unset_crop(self):
+        self.set_crop(CropRect(0.5, 0.5, 1, 1))
+
+    def set_exposure(self, exp_time: int, sens_iso: int) -> None:
+        msg = dai.CameraControl()
+        msg.setManualExposure(exp_time, sens_iso)
+        self.cam_ctrl.send(msg)
+
+
 class StereoCamera:
     def __init__(
             self, resolution: typing.Tuple[int, int], fps: int
@@ -73,17 +115,10 @@ class StereoCamera:
 
         sync = self.pipeline.create(dai.node.Sync)
         sync.setRunOnHost(True)
-        self.ctrl_q_l = self.add_camera(dai.CameraBoardSocket.CAM_B, "left", sync)
-        self.ctrl_q_r = self.add_camera(dai.CameraBoardSocket.CAM_C, "right", sync)
+        self.cam_l = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_B, "left", sync, self.resolution, self.fps)
+        self.cam_r = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_C, "right", sync, self.resolution, self.fps)
         self.synced_q = sync.out.createOutputQueue(maxSize=1, blocking=False)
         return self
-
-    def add_camera(self, socket: dai.CameraBoardSocket, name: str, sync: dai.node.Sync) -> dai.InputQueue:
-        cam = self.pipeline.create(dai.node.Camera).build(socket, self.resolution, self.fps)
-        cam.requestOutput(self.resolution).link(sync.inputs[name])
-        sync.inputs[name].setBlocking(False)
-        sync.inputs[name].setMaxSize(1)
-        return cam.inputControl.createInputQueue()
 
     def start(self):
         self.pipeline.start()
@@ -177,10 +212,16 @@ class StereoCamera:
         return first
 
     def set_exposure(self, exp_time: int, sens_iso: int) -> None:
-        msg = dai.CameraControl()
-        msg.setManualExposure(exp_time, sens_iso)
-        self.ctrl_q_l.send(msg)
-        self.ctrl_q_r.send(msg)
+        self.cam_l.set_exposure(exp_time, sens_iso)
+        self.cam_r.set_exposure(exp_time, sens_iso)
+
+    def set_crop(self, rect_l: CropRect, rect_r: CropRect):
+        self.cam_l.set_crop(rect_l)
+        self.cam_r.set_crop(rect_r)
+
+    def unset_crop(self):
+        self.cam_l.unset_crop()
+        self.cam_r.unset_crop()
 
 
 class BlobDetector:
@@ -247,6 +288,7 @@ class Worker(QtCore.QThread):
             sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
             stereo_cam.start()
+            #stereo_cam.set_crop(CropRect(.5, .5, .25, .25), CropRect(.5, .5, .25, .25))
 
             while self.running:
                 if self.settings_changed:

@@ -68,10 +68,147 @@ class Frame:
 
 @dataclass(frozen=True)
 class CropRect:
-    x_min: float
-    y_min: float
-    x_max: float
-    y_max: float
+    x_min: int
+    y_min: int
+    x_max: int
+    y_max: int
+
+
+class Cropper:
+    """Produces a finite set of fixed crop regions and reverses the crop.
+
+    ``get_crop_rect`` picks, for a detected point, the crop region whose center
+    is closest to that point. ``uncrop`` takes an image that the camera cropped
+    with one of these regions and places it back where it was captured, padding
+    the rest with black pixels so the result has the full frame resolution.
+
+    The core difficulty is that the region has to be recovered from *only* the
+    width and height of the returned image, because the crop instruction that
+    the camera actually applied is not known when the frame arrives. This is
+    solved by giving every region a unique size, so a returned image's size
+    identifies the region that produced it.
+
+    The regions are laid out on an equally spaced grid. Because the tracked
+    object moves continuously across the frame, adjacent regions overlap (by
+    ``overlap`` of their extent, one third by default) so the object is never
+    cut in half between two neighbours. The camera does not pad a crop that
+    extends past the image edges (which would yield an unexpected size), so the
+    regions are kept inside the frame; the outermost ones may stop a few pixels
+    short because of their slightly different sizes.
+    """
+
+    def __init__(self, resolution: typing.Tuple[int, int], cols: int = 4, rows: int = 3,
+                 overlap: float = 1.0 / 3.0, size_step: int = 4, margin: int = 4):
+        if cols < 1 or rows < 1:
+            raise ValueError("cols and rows must be >= 1")
+        if not 0.0 <= overlap < 1.0:
+            raise ValueError("overlap must be in [0, 1)")
+        self.width, self.height = resolution
+        self.cols = cols
+        self.rows = rows
+        self.overlap = overlap
+        # Ensure size_step is a multiple of 4 so that all generated region
+        # widths and heights are also multiples of 4.
+        self.size_step = max(4, (size_step + 3) // 4 * 4)
+        self.margin = margin
+
+        # The largest region along each axis spans the full usable extent; every
+        # other region is smaller by a multiple of ``size_step`` so that all
+        # widths (per column) and heights (per row) - and therefore all
+        # (width, height) pairs - are distinct.
+        nominal_w = int((self.width - margin) / (1 + (cols - 1) * (1 - overlap))) // 4 * 4
+        nominal_h = int((self.height - margin) / (1 + (rows - 1) * (1 - overlap))) // 4 * 4
+        base_w = nominal_w - (cols - 1) * size_step
+        base_h = nominal_h - (rows - 1) * size_step
+        if base_w <= 0 or base_h <= 0:
+            raise ValueError("Too many regions (or size_step too large) for this resolution")
+
+        # Equal spacing between region centers, derived from the nominal size so
+        # neighbouring regions overlap by ``overlap`` of that size.
+        step_x = nominal_w * (1 - overlap)
+        step_y = nominal_h * (1 - overlap)
+        start_x = margin / 2.0 + nominal_w / 2.0
+        start_y = margin / 2.0 + nominal_h / 2.0
+
+        self.regions: typing.List[CropRect] = []
+        self.centers: typing.List[typing.Tuple[float, float]] = []
+        self._by_size: typing.Dict[typing.Tuple[int, int], CropRect] = {}
+        for j in range(rows):
+            for i in range(cols):
+                w = base_w + i * size_step
+                h = base_h + j * size_step
+                cx = start_x + i * step_x
+                cy = start_y + j * step_y
+                x_min = int(round(cx - w / 2.0))
+                y_min = int(round(cy - h / 2.0))
+                x_max = x_min + w
+                y_max = y_min + h
+                # Defensive clamp: never let a region exceed the frame, keeping
+                # its size (and thus its identity) intact by shifting inwards.
+                if x_max > self.width:
+                    x_min -= x_max - self.width
+                    x_max = self.width
+                if y_max > self.height:
+                    y_min -= y_max - self.height
+                    y_max = self.height
+                x_min = max(0, x_min)
+                y_min = max(0, y_min)
+                rect = CropRect(x_min, y_min, x_max, y_max)
+                self.regions.append(rect)
+                self.centers.append((cx, cy))
+                self._by_size[(w, h)] = rect
+
+    def get_crop_rect(self, x: float, y: float) -> CropRect:
+        """Return the crop region whose center is closest to ``(x, y)``.
+
+        Coordinates use the image convention: the origin is at the top-left,
+        ``x`` grows to the right and ``y`` downward, in pixels of the full frame.
+        """
+        best_index = min(
+            range(len(self.centers)),
+            key=lambda k: (self.centers[k][0] - x) ** 2 + (self.centers[k][1] - y) ** 2,
+        )
+        return self.regions[best_index]
+
+    def uncrop(self, cropped: np.ndarray) -> np.ndarray:
+        """Place a cropped image back where it was captured, padding with black.
+
+        The originating region is recovered solely from the width and height of
+        ``cropped``. The returned image has the full frame resolution.
+        """
+        uncropped = np.zeros((self.height, self.width), dtype=cropped.dtype)
+        h, w = cropped.shape[:2]
+        rect = self._region_for_size(w, h)
+        # Anchor at the recovered region's top-left, or the frame's top-left when
+        # the size is unknown (e.g. a full/unset frame).
+        x0 = rect.x_min if rect is not None else 0
+        y0 = rect.y_min if rect is not None else 0
+        # Clip to the frame so a size that differs slightly (camera rounding)
+        # from the region cannot overflow the destination.
+        y1 = min(y0 + h, self.height)
+        x1 = min(x0 + w, self.width)
+        uncropped[y0:y1, x0:x1] = cropped[0:y1 - y0, 0:x1 - x0]
+        return uncropped
+
+    def _region_for_size(self, w: int, h: int) -> typing.Optional[CropRect]:
+        rect = self._by_size.get((w, h))
+        if rect is not None:
+            return rect
+        # A full (crop unset) frame is not one of the regions.
+        if w >= self.width and h >= self.height:
+            return None
+        # Tolerate small rounding differences from the camera by matching the
+        # closest known size, but only when it is clearly the best match.
+        best_rect = None
+        best_dist = None
+        for (rw, rh), candidate in self._by_size.items():
+            dist = (rw - w) ** 2 + (rh - h) ** 2
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_rect = candidate
+        if best_dist is not None and best_dist < (self.size_step ** 2):
+            return best_rect
+        return None
 
 
 class MonoCamera:
@@ -80,6 +217,7 @@ class MonoCamera:
         self.resolution = resolution
         self.numeric_resolution = RESOLUTION_MAP[resolution]
         self.prev_frame_arrival_time = -1.0
+        self.cropper = Cropper(self.numeric_resolution)
 
         cam = pipeline.create(dai.node.MonoCamera)
         assert isinstance(cam, dai.node.MonoCamera)
@@ -91,6 +229,9 @@ class MonoCamera:
         assert isinstance(manip, dai.node.ImageManip)
         manip.inputImage.setBlocking(False)
         manip.inputImage.setQueueSize(1)
+        # Allocate an output buffer large enough for the biggest possible output
+        # (the full frame, produced when the crop is unset).
+        manip.setMaxOutputFrameSize(self.numeric_resolution[0] * self.numeric_resolution[1])
         self.manip_ctrl = pipeline.create(dai.node.XLinkIn)
         assert isinstance(self.manip_ctrl, dai.node.XLinkIn)
         self.manip_ctrl_q_name = f"{name}_manip_control"
@@ -140,12 +281,10 @@ class MonoCamera:
         return Frame(cv_frame, rect_uncropped, frame_time_ms, capture_time, arrival_time)
 
     def uncrop(self, cropped: np.ndarray) -> np.ndarray:
-        uncropped = np.zeros((self.numeric_resolution[1], self.numeric_resolution[0]), dtype=np.uint8)
-        h, w = cropped.shape[:2]
-        x_max = min(w, self.numeric_resolution[0])
-        y_max = min(h, self.numeric_resolution[1])
-        uncropped[0:y_max, 0:x_max] = cropped
-        return uncropped
+        return self.cropper.uncrop(cropped)
+
+    def set_crop_to_point(self, device: dai.Device, x: float, y: float):
+        self.set_crop(device, self.cropper.get_crop_rect(x, y))
 
     def set_crop(self, device: dai.Device, rect: CropRect):
         msg = dai.ImageManipConfig()
@@ -154,10 +293,15 @@ class MonoCamera:
         x_max = rect.x_max / self.numeric_resolution[0]
         y_max = rect.y_max / self.numeric_resolution[1]
         msg.setCropRect(x_min, y_min, x_max, y_max)
+        # Force the output to the crop's exact native pixel size to avoid
+        # stretching (zoom) or rounding-induced squishing.
+        width = int(round(rect.x_max - rect.x_min))
+        height = int(round(rect.y_max - rect.y_min))
+        msg.setResize(width, height)
         device.getInputQueue(self.manip_ctrl_q_name).send(msg)
 
     def unset_crop(self, device: dai.Device):
-        self.set_crop(device, CropRect(0.5, 0.5, 1, 1))
+        self.set_crop(device, CropRect(0, 0, self.numeric_resolution[0], self.numeric_resolution[1]))
 
     def set_exposure(self, device: dai.Device, exp_time: int, sens_iso: int) -> None:
         msg = dai.CameraControl()
@@ -279,6 +423,20 @@ class StereoCamera:
         self.cam_l.unset_crop(self.device)
         self.cam_r.unset_crop(self.device)
 
+    def track_crop(self, found_l: bool, x_l: float, y_l: float,
+                   found_r: bool, x_r: float, y_r: float):
+        # Coordinates are in full-frame image pixels (origin at top-left). When a
+        # point is detected the crop follows it; otherwise the crop is released
+        # to the full frame so the target can be re-acquired.
+        if found_l:
+            self.cam_l.set_crop_to_point(self.device, x_l, y_l)
+        else:
+            self.cam_l.unset_crop(self.device)
+        if found_r:
+            self.cam_r.set_crop_to_point(self.device, x_r, y_r)
+        else:
+            self.cam_r.unset_crop(self.device)
+
 
 class BlobDetector:
     def __init__(self, config):
@@ -359,6 +517,15 @@ class Worker(QtCore.QThread):
 
                 self.frame_ready.emit(frame_l.uncropped.copy(), frame_r.uncropped.copy())
                 self.centroid_ready.emit(cX_l, cY_l, s_l, cX_r, cY_r, s_r)
+
+                # Steer each camera's crop towards the detected point for the next
+                # frame. The detector reports y with the origin at the bottom, so
+                # convert back to the top-left origin the cropper expects.
+                frame_h = CAMERA_RESOLUTION_NUMERIC[1]
+                stereo_cam.track_crop(
+                    s_l, cX_l, frame_h - cY_l,
+                    s_r, cX_r, frame_h - cY_r,
+                )
 
                 latency_arrival = (frame_l.time_of_arrival - frame_l.time_of_capture) * 1000
                 ts_diff_us = abs(frame_l.time_of_capture - frame_r.time_of_capture) * 1_000_000

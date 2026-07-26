@@ -516,8 +516,11 @@ class Worker(QtCore.QThread):
                 # 3. Also consider blob size similarity
                 size_ratio = min(s_l, s_r) / max(s_l, s_r, 1e-6)
 
+                # 4. And absolute size
+                size = s_l + s_r
+
                 # Scoring
-                score = y_diff * .1 + (1.0 - size_ratio) + dist_from_typical_pos * .1
+                score = y_diff * .1 + (1.0 - size_ratio) + dist_from_typical_pos * .01 + 10 / size
 
                 if score < best_score:
                     best_score = score

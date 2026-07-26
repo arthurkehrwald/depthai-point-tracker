@@ -1,3 +1,4 @@
+import collections
 import math
 import sys
 import json
@@ -23,6 +24,9 @@ RESOLUTION_MAP = {
 }
 CAMERA_RESOLUTION_NUMERIC = RESOLUTION_MAP[CAMERA_RESOLUTION]
 CAMERA_FPS = 100
+# How far ahead (in seconds) the crop position is predicted, to compensate for
+# the time it takes for a crop change to take effect.
+CROP_PREDICTION_LOOKAHEAD_S = 0.05
 
 
 def load_config():
@@ -75,6 +79,71 @@ class CropRect:
     y_max: int
 
 
+@dataclass(frozen=True)
+class DetectionRecord:
+    """A single matched detection, as produced by ``match_candidates``.
+
+    ``point_l``/``point_r`` are the 2D detection positions (in full-frame image
+    pixels, origin at top-left) in the left/right camera images, ``timestamp``
+    is the capture time of the frame pair, ``pos_3d`` is the triangulated 3D
+    position, and ``confidence`` is the match confidence.
+    """
+    point_l: typing.Tuple[float, float]
+    point_r: typing.Tuple[float, float]
+    timestamp: float
+    pos_3d: np.ndarray
+    confidence: float
+
+
+class DetectionHistory:
+    """Keeps a sliding window of recent detections and predicts where the
+    tracked point will be in each camera image a short time ahead.
+
+    The prediction is a linear extrapolation (least-squares fit of position
+    over time) of the recent 2D detections in each camera, which reacts faster
+    to a moving target than simply using the latest detected position.
+    """
+
+    def __init__(self, max_len: int = 5):
+        self.records: typing.Deque[DetectionRecord] = collections.deque(maxlen=max_len)
+
+    def add(self, record: DetectionRecord) -> None:
+        self.records.append(record)
+
+    def clear(self) -> None:
+        self.records.clear()
+
+    def predict(
+            self, lookahead: float
+    ) -> typing.Optional[typing.Tuple[typing.Tuple[float, float], typing.Tuple[float, float]]]:
+        """Predict ``(point_l, point_r)`` ``lookahead`` seconds after the most
+        recent detection, based on the recorded history. Returns ``None`` if
+        there is no history yet.
+        """
+        if not self.records:
+            return None
+        if len(self.records) == 1:
+            record = self.records[0]
+            return record.point_l, record.point_r
+
+        times = np.array([r.timestamp for r in self.records])
+        target_time = times[-1] + lookahead
+
+        def fit_predict(values: np.ndarray) -> float:
+            # Linear least-squares fit: values = a * t + b
+            a, b = np.polyfit(times, values, 1)
+            return float(a * target_time + b)
+
+        xs_l = np.array([r.point_l[0] for r in self.records])
+        ys_l = np.array([r.point_l[1] for r in self.records])
+        xs_r = np.array([r.point_r[0] for r in self.records])
+        ys_r = np.array([r.point_r[1] for r in self.records])
+
+        point_l = (fit_predict(xs_l), fit_predict(ys_l))
+        point_r = (fit_predict(xs_r), fit_predict(ys_r))
+        return point_l, point_r
+
+
 class Cropper:
     """Produces a finite set of fixed crop regions and reverses the crop.
 
@@ -98,7 +167,7 @@ class Cropper:
     short because of their slightly different sizes.
     """
 
-    def __init__(self, resolution: typing.Tuple[int, int], cols: int = 9, rows: int = 6,
+    def __init__(self, resolution: typing.Tuple[int, int], cols: int = 5, rows: int = 4,
                  overlap: float = 1.0 / 2.0, size_step: int = 4, margin: int = 4):
         if cols < 1 or rows < 1:
             raise ValueError("cols and rows must be >= 1")
@@ -552,14 +621,15 @@ def match_candidates(candidates_l, candidates_r, stereo_cam: StereoCamera):
                 best_match = {
                     'left': (x_l, y_l, s_l),
                     'right': (x_r, y_r, s_r),
-                    'pos_3d': pos_3d
+                    'pos_3d': pos_3d,
+                    'confidence': highest_confidence
                 }
     return best_match
 
 
 class Worker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray, np.ndarray)
-    centroid_ready = QtCore.Signal(float, float, bool, float, float, bool)
+    centroid_ready = QtCore.Signal(float, float, bool, float, float, bool, float, float, float, float, bool)
     position_ready = QtCore.Signal(np.ndarray)
     stats_ready = QtCore.Signal(float, float, float, float, float)
 
@@ -582,6 +652,7 @@ class Worker(QtCore.QThread):
         self.blob_settings_changed = True
         self.last_pos = None
         self.last_pos_time = None
+        self.detection_history = DetectionHistory()
 
     def run(self):
         with StereoCamera(CAMERA_RESOLUTION, CAMERA_FPS) as stereo_cam:
@@ -621,18 +692,41 @@ class Worker(QtCore.QThread):
                     # For UI display on vertically flipped images
                     cY_l = frame_h - cY_l_top
                     cY_r = frame_h - cY_r_top
+
+                    self.detection_history.add(DetectionRecord(
+                        point_l=(cX_l, cY_l_top),
+                        point_r=(cX_r, cY_r_top),
+                        timestamp=frame_l.time_of_capture,
+                        pos_3d=tracked_pos,
+                        confidence=match['confidence'],
+                    ))
                 else:
                     s_l = s_r = False
                     cX_l = cY_l = cX_r = cY_r = -1.0
                     cY_l_top = cY_r_top = -1.0
 
-                self.frame_ready.emit(frame_l.uncropped.copy(), frame_r.uncropped.copy())
-                self.centroid_ready.emit(cX_l, cY_l, s_l, cX_r, cY_r, s_r)
+                # Steer each camera's crop towards where the point is predicted to
+                # be a short time ahead, using the recent detection history, since
+                # simply following the latest detection is too slow for fast
+                # moving objects.
+                prediction = self.detection_history.predict(CROP_PREDICTION_LOOKAHEAD_S)
+                if prediction is not None:
+                    (pX_l, pY_l_top), (pX_r, pY_r_top) = prediction
+                    has_p = True
+                else:
+                    (pX_l, pY_l_top), (pX_r, pY_r_top) = (cX_l, cY_l_top), (cX_r, cY_r_top)
+                    has_p = False
 
-                # Steer each camera's crop towards the detected point for the next frame.
+                frame_h = CAMERA_RESOLUTION_NUMERIC[1]
+                pY_l = frame_h - pY_l_top if has_p or s_l else -1.0
+                pY_r = frame_h - pY_r_top if has_p or s_r else -1.0
+
+                self.frame_ready.emit(frame_l.uncropped.copy(), frame_r.uncropped.copy())
+                self.centroid_ready.emit(cX_l, cY_l, s_l, cX_r, cY_r, s_r, pX_l, pY_l, pX_r, pY_r, has_p)
+
                 stereo_cam.track_crop(
-                    s_l, cX_l, cY_l_top,
-                    s_r, cX_r, cY_r_top,
+                    s_l, pX_l, pY_l_top,
+                    s_r, pX_r, pY_r_top,
                 )
 
                 latency_arrival = (frame_l.time_of_arrival - frame_l.time_of_capture) * 1000
@@ -821,6 +915,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.crosshair_v_l.hide()
         self.crosshair_h_l.hide()
 
+        self.pred_marker_l = pg.ScatterPlotItem(size=10, pen=pg.mkPen(None), brush=pg.mkBrush('g'))
+        self.vb_l.addItem(self.pred_marker_l)
+
         self.image_view_r = pg.GraphicsLayoutWidget()
         self.image_view_r.setBackground('gray')
         self.image_view_r.setMinimumSize(300, 400)
@@ -835,6 +932,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vb_r.addItem(self.crosshair_h_r)
         self.crosshair_v_r.hide()
         self.crosshair_h_r.hide()
+
+        self.pred_marker_r = pg.ScatterPlotItem(size=10, pen=pg.mkPen(None), brush=pg.mkBrush('g'))
+        self.vb_r.addItem(self.pred_marker_r)
 
         # Pre-fill both ImageItems with a blank frame of identical size so the
         # left and right previews have the same shape/aspect ratio right from
@@ -939,8 +1039,8 @@ class MainWindow(QtWidgets.QMainWindow):
             mirrored = cv2.flip(rotated_frame, 1)
             img_item.setImage(mirrored.T, autoLevels=False, levels=(0, 255))
 
-    @QtCore.Slot(float, float, bool, float, float, bool)
-    def on_centroid(self, x_l, y_l, found_l, x_r, y_r, found_r):
+    @QtCore.Slot(float, float, bool, float, float, bool, float, float, float, float, bool)
+    def on_centroid(self, x_l, y_l, found_l, x_r, y_r, found_r, px_l, py_l, px_r, py_r, has_p):
         # Update Left
         if found_l:
             self.crosshair_v_l.setPos(x_l)
@@ -951,6 +1051,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.crosshair_v_l.hide()
             self.crosshair_h_l.hide()
 
+        if has_p:
+            self.pred_marker_l.setData(pos=[(px_l, py_l)])
+            self.pred_marker_l.show()
+        else:
+            self.pred_marker_l.hide()
+
         # Update Right
         if found_r:
             self.crosshair_v_r.setPos(x_r)
@@ -960,6 +1066,12 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.crosshair_v_r.hide()
             self.crosshair_h_r.hide()
+
+        if has_p:
+            self.pred_marker_r.setData(pos=[(px_r, py_r)])
+            self.pred_marker_r.show()
+        else:
+            self.pred_marker_r.hide()
 
         text_l = f"L: {x_l:.1f}, {y_l:.1f}" if found_l else "L: N/A"
         text_r = f"R: {x_r:.1f}, {y_r:.1f}" if found_r else "R: N/A"

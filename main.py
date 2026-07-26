@@ -505,6 +505,8 @@ class Worker(QtCore.QThread):
             PORT = 4241
             sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+            stereo_cam.set_exposure(self.exposure, self.iso)
+
             while self.running:
                 if self.settings_changed:
                     stereo_cam.set_exposure(self.exposure, self.iso)
@@ -739,8 +741,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # and lock their views together so they always stay in sync.
         blank_w, blank_h = CAMERA_RESOLUTION_NUMERIC
         blank_frame = np.zeros((blank_w, blank_h), dtype=np.uint8)
-        self.img_item_l.setImage(blank_frame)
-        self.img_item_r.setImage(blank_frame)
+        # Disable pyqtgraph's automatic level (brightness/contrast) scaling so the
+        # preview reflects the camera's actual exposure instead of being
+        # auto-stretched to the min/max of each frame, which otherwise makes
+        # dark frames appear artificially lightened.
+        self.img_item_l.setImage(blank_frame, autoLevels=False, levels=(0, 255))
+        self.img_item_r.setImage(blank_frame, autoLevels=False, levels=(0, 255))
         self.vb_r.setXLink(self.vb_l)
         self.vb_r.setYLink(self.vb_l)
 
@@ -830,7 +836,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for frame, img_item in [(frame_l, self.img_item_l), (frame_r, self.img_item_r)]:
             rotated_frame = cv2.rotate(frame, cv2.ROTATE_180)
             mirrored = cv2.flip(rotated_frame, 1)
-            img_item.setImage(mirrored.T)
+            img_item.setImage(mirrored.T, autoLevels=False, levels=(0, 255))
 
     @QtCore.Slot(float, float, bool, float, float, bool)
     def on_centroid(self, x_l, y_l, found_l, x_r, y_r, found_r):

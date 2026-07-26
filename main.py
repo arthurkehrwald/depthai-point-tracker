@@ -265,8 +265,7 @@ class MonoCamera:
         assert isinstance(frame, dai.ImgFrame)
         return frame
 
-    def process_frame(self, frame: dai.ImgFrame):
-        arrival_time = dai.Clock.now().total_seconds()
+    def process_frame(self, frame: dai.ImgFrame, arrival_time: float):
         frame_time_ms = (arrival_time - self.prev_frame_arrival_time) * 1000
         self.prev_frame_arrival_time = arrival_time
         capture_time = frame.getTimestamp().total_seconds()
@@ -393,8 +392,9 @@ class StereoCamera:
         # of inconsistent scheduling.
         raw_frame_l = self.cam_l.get_frame(self.device)
         raw_frame_r = self.cam_r.get_frame(self.device)
-        frame_l = self.cam_l.process_frame(raw_frame_l)
-        frame_r = self.cam_r.process_frame(raw_frame_r)
+        arrival_time = dai.Clock.now().total_seconds()
+        frame_l = self.cam_l.process_frame(raw_frame_l, arrival_time)
+        frame_r = self.cam_r.process_frame(raw_frame_r, arrival_time)
         return frame_l, frame_r
 
     def triangulate(

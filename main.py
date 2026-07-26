@@ -97,8 +97,8 @@ class Cropper:
     short because of their slightly different sizes.
     """
 
-    def __init__(self, resolution: typing.Tuple[int, int], cols: int = 7, rows: int = 5,
-                 overlap: float = 1.0 / 3.0, size_step: int = 4, margin: int = 4):
+    def __init__(self, resolution: typing.Tuple[int, int], cols: int = 9, rows: int = 6,
+                 overlap: float = 1.0 / 2.0, size_step: int = 4, margin: int = 4):
         if cols < 1 or rows < 1:
             raise ValueError("cols and rows must be >= 1")
         if not 0.0 <= overlap < 1.0:

@@ -284,7 +284,6 @@ class MonoCamera:
         if rect == self.current_crop:
             return
         self.current_crop = rect
-        print(f"Set crop {self.name}: {rect}")
         msg = dai.ImageManipConfig()
         x_min = rect.x_min / self.numeric_resolution[0]
         y_min = rect.y_min / self.numeric_resolution[1]

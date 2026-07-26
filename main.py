@@ -387,7 +387,6 @@ class StereoCamera:
         raw_frame_l = message_group["left"]
         raw_frame_r = message_group["right"]
         assert isinstance(raw_frame_l, dai.ImgFrame) and isinstance(raw_frame_r, dai.ImgFrame)
-        arrival_time = dai.Clock.now().total_seconds()
         frame_l = self.cam_l.process_frame(raw_frame_l, arrival_time)
         frame_r = self.cam_r.process_frame(raw_frame_r, arrival_time)
         return frame_l, frame_r

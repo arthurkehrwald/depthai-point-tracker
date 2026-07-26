@@ -21,7 +21,7 @@ RESOLUTION_MAP = {
     dai.MonoCameraProperties.SensorResolution.THE_400_P: (640, 400)
 }
 CAMERA_RESOLUTION_NUMERIC = RESOLUTION_MAP[CAMERA_RESOLUTION]
-CAMERA_FPS = 60
+CAMERA_FPS = 100
 
 
 def load_config():

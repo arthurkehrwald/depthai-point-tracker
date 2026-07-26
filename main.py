@@ -447,17 +447,19 @@ class BlobDetector:
         params = cv2.SimpleBlobDetector.Params()
         params.minThreshold = config.get("blob_min_threshold", 80)
         params.maxThreshold = config.get("blob_max_threshold", 255)
+        params.maxThreshold = max(params.maxThreshold, params.minThreshold)
         params.filterByColor = True
         params.blobColor = 255
         params.filterByArea = True
         params.minArea = config.get("blob_min_area", 20)
         params.maxArea = config.get("blob_max_area", 1000)
+        params.maxArea = max(params.maxArea, params.minArea)
         params.filterByCircularity = True
-        params.minCircularity = config.get("blob_min_circularity", 0.7)
+        params.minCircularity = max(0.01, config.get("blob_min_circularity", 0.7))
         params.filterByConvexity = True
-        params.minConvexity = config.get("blob_min_convexity", 0.9)
+        params.minConvexity = max(0.01, config.get("blob_min_convexity", 0.9))
         params.filterByInertia = True
-        params.minInertiaRatio = config.get("blob_min_inertia", 0.6)
+        params.minInertiaRatio = max(0.01, config.get("blob_min_inertia", 0.6))
         self.detector = cv2.SimpleBlobDetector.create(params)
 
     def try_detect(self, img: cv2.typing.MatLike) -> typing.Tuple[bool, float, float]:

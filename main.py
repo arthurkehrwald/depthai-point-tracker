@@ -463,13 +463,10 @@ class BlobDetector:
         params.minInertiaRatio = max(0.01, config.get("blob_min_inertia", 0.6))
         self.detector = cv2.SimpleBlobDetector.create(params)
 
-    def try_detect(self, img: cv2.typing.MatLike) -> typing.Tuple[bool, float, float]:
+    def detect_candidates(self, img: cv2.typing.MatLike) -> typing.List[typing.Tuple[float, float, float]]:
         keypoints = self.detector.detect(img)
-        if keypoints:
-            biggest = max(keypoints, key=lambda kp: kp.size).pt
-            img_height = np.shape(img)[0]
-            return True, biggest[0], (biggest[1] - img_height) * -1  # Move origin from top to bottom
-        return False, -1, -1
+        keypoints = sorted(keypoints, key=lambda kp: kp.size, reverse=True)[:10]
+        return [(kp.pt[0], kp.pt[1], kp.size) for kp in keypoints]
 
 
 class Worker(QtCore.QThread):
@@ -495,6 +492,41 @@ class Worker(QtCore.QThread):
         }
         self.settings_changed = True
         self.blob_settings_changed = True
+        self.last_pos = None
+        self.last_pos_time = None
+
+    def match_candidates(self, candidates_l, candidates_r, stereo_cam: StereoCamera, capture_time: float):
+        best_match = None
+        best_score = float('inf')
+
+        for x_l, y_l, s_l in candidates_l:
+            for x_r, y_r, s_r in candidates_r:
+                # 1. Epipolar constraint: Corresponding points must have very similar Y-coordinates in image space
+                y_diff = abs(y_l - y_r)
+                if y_diff > 10.0:  # 10 pixels threshold for epipolar match
+                    continue
+
+                # 2. Plausibility of 3D position
+                pos_3d = stereo_cam.triangulate((x_l, y_l), (x_r, y_r))
+                z = pos_3d[2]
+                if not (5 <= z <= 500):
+                    continue
+                dist_from_typical_pos = np.linalg.norm(pos_3d - np.array([0, 0, 100]))
+
+                # 3. Also consider blob size similarity
+                size_ratio = min(s_l, s_r) / max(s_l, s_r, 1e-6)
+
+                # Scoring
+                score = y_diff * .1 + (1.0 - size_ratio) + dist_from_typical_pos * .1
+
+                if score < best_score:
+                    best_score = score
+                    best_match = {
+                        'left': (x_l, y_l, s_l),
+                        'right': (x_r, y_r, s_r),
+                        'pos_3d': pos_3d
+                    }
+        return best_match
 
     def run(self):
         with StereoCamera(CAMERA_RESOLUTION, CAMERA_FPS) as stereo_cam:
@@ -517,19 +549,35 @@ class Worker(QtCore.QThread):
 
                 frame_l, frame_r = stereo_cam.get_stereo_frames()
 
-                s_l, cX_l, cY_l = blob_detector.try_detect(frame_l.uncropped)
-                s_r, cX_r, cY_r = blob_detector.try_detect(frame_r.uncropped)
+                candidates_l = blob_detector.detect_candidates(frame_l.uncropped)
+                candidates_r = blob_detector.detect_candidates(frame_r.uncropped)
+
+                match = self.match_candidates(candidates_l, candidates_r, stereo_cam, frame_l.time_of_capture)
+
+                if match:
+                    cX_l, cY_l_top, _ = match['left']
+                    cX_r, cY_r_top, _ = match['right']
+                    tracked_pos = match['pos_3d']
+                    self.last_pos = tracked_pos
+                    self.last_pos_time = frame_l.time_of_capture
+                    s_l = s_r = True
+
+                    frame_h = CAMERA_RESOLUTION_NUMERIC[1]
+                    # For UI display on vertically flipped images
+                    cY_l = frame_h - cY_l_top
+                    cY_r = frame_h - cY_r_top
+                else:
+                    s_l = s_r = False
+                    cX_l = cY_l = cX_r = cY_r = -1.0
+                    cY_l_top = cY_r_top = -1.0
 
                 self.frame_ready.emit(frame_l.uncropped.copy(), frame_r.uncropped.copy())
                 self.centroid_ready.emit(cX_l, cY_l, s_l, cX_r, cY_r, s_r)
 
-                # Steer each camera's crop towards the detected point for the next
-                # frame. The detector reports y with the origin at the bottom, so
-                # convert back to the top-left origin the cropper expects.
-                frame_h = CAMERA_RESOLUTION_NUMERIC[1]
+                # Steer each camera's crop towards the detected point for the next frame.
                 stereo_cam.track_crop(
-                    s_l, cX_l, frame_h - cY_l,
-                    s_r, cX_r, frame_h - cY_r,
+                    s_l, cX_l, cY_l_top,
+                    s_r, cX_r, cY_r_top,
                 )
 
                 latency_arrival = (frame_l.time_of_arrival - frame_l.time_of_capture) * 1000
@@ -538,7 +586,6 @@ class Worker(QtCore.QThread):
                 latency_total = -1.0
 
                 if s_l and s_r:
-                    tracked_pos = stereo_cam.triangulate((cX_l, cY_l), (cX_r, cY_r))
                     t_3d_finished = dai.Clock.now().total_seconds()
                     latency_calc = (t_3d_finished - frame_l.time_of_arrival) * 1000
                     latency_total = (t_3d_finished - frame_l.time_of_capture) * 1000
@@ -866,7 +913,8 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(np.ndarray)
     def on_position(self, pos):
         self.pos_label.setText(f"XYZ: {pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}")
-        self.pos_marker.setData(pos=np.array([[pos[0], pos[2], pos[1]]]))
+        # OpenCV Y is down, so negate it for GL view Z (up)
+        self.pos_marker.setData(pos=np.array([[pos[0], pos[2], -pos[1]]]))
         self.data_x.append(pos[0])
         self.data_y.append(pos[1])
         self.data_z.append(pos[2])

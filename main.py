@@ -212,7 +212,7 @@ class Cropper:
 
 
 class MonoCamera:
-    def __init__(self, pipeline: dai.Pipeline, socket: dai.CameraBoardSocket, name: str,
+    def __init__(self, pipeline: dai.Pipeline, socket: dai.CameraBoardSocket, name: str, sync: dai.node.Sync,
                  resolution: dai.MonoCameraProperties.SensorResolution, fps: int):
         self.resolution = resolution
         self.numeric_resolution = RESOLUTION_MAP[resolution]
@@ -239,13 +239,9 @@ class MonoCamera:
         self.manip_ctrl.out.link(manip.inputConfig)
         cam.out.link(manip.inputImage)
 
-        x_out = pipeline.create(dai.node.XLinkOut)
-        assert isinstance(x_out, dai.node.XLinkOut)
-        self.x_out_name = f"{name}_x_out"
-        x_out.setStreamName(self.x_out_name)
-        x_out.input.setBlocking(False)
-        x_out.input.setQueueSize(1)
-        manip.out.link(x_out.input)
+        manip.out.link(sync.inputs[name])
+        sync.inputs[name].setBlocking(False)
+        sync.inputs[name].setQueueSize(1)
 
         self.cam_ctrl = pipeline.create(dai.node.XLinkIn)
         assert isinstance(self.cam_ctrl, dai.node.XLinkIn)
@@ -259,11 +255,6 @@ class MonoCamera:
     def set_rectification_maps(self, rect_map_x: np.ndarray, rect_map_y: np.ndarray):
         self.rect_map_x = rect_map_x
         self.rect_map_y = rect_map_y
-
-    def get_frame(self, device: dai.Device) -> dai.ImgFrame:
-        frame = device.getOutputQueue(self.x_out_name).get()
-        assert isinstance(frame, dai.ImgFrame)
-        return frame
 
     def process_frame(self, frame: dai.ImgFrame, arrival_time: float):
         frame_time_ms = (arrival_time - self.prev_frame_arrival_time) * 1000
@@ -313,8 +304,17 @@ class StereoCamera:
 
     def __enter__(self) -> "StereoCamera":
         self.pipeline = dai.Pipeline()
-        self.cam_l = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_B, "left", self.resolution, self.fps)
-        self.cam_r = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_C, "right", self.resolution, self.fps)
+        sync = self.pipeline.create(dai.node.Sync)
+        assert isinstance(sync, dai.node.Sync)
+        self.cam_l = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_B, "left", sync, self.resolution, self.fps)
+        self.cam_r = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_C, "right", sync, self.resolution, self.fps)
+        x_out_sync = self.pipeline.create(dai.node.XLinkOut)
+        assert isinstance(x_out_sync, dai.node.XLinkOut)
+        self.x_out_stream_name = "x_out"
+        x_out_sync.setStreamName(self.x_out_stream_name)
+        sync.out.link(x_out_sync.input)
+        x_out_sync.input.setBlocking(False)
+        x_out_sync.input.setQueueSize(1)
         self.device = dai.Device(self.pipeline)
         self.cam_params_l, self.cam_params_r = self.compute_stereo_rectification()
         self.cam_l.set_rectification_maps(self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y)
@@ -381,12 +381,12 @@ class StereoCamera:
                 CameraSocketParams(projection_r, rectify_map_r_x, rectify_map_r_y))
 
     def get_stereo_frames(self) -> typing.Tuple[Frame, Frame]:
-        # The frames are retrieved and processed in separate functions to make sure both
-        # frames are retrieved at the same time, since processing introduces a delay
-        # during which a new frame may arrive. Multithreading didn't work because
-        # of inconsistent scheduling.
-        raw_frame_l = self.cam_l.get_frame(self.device)
-        raw_frame_r = self.cam_r.get_frame(self.device)
+        message_group = self.device.getOutputQueue(self.x_out_stream_name).get()
+        arrival_time = dai.Clock.now().total_seconds()
+        assert isinstance(message_group, dai.MessageGroup)
+        raw_frame_l = message_group["left"]
+        raw_frame_r = message_group["right"]
+        assert isinstance(raw_frame_l, dai.ImgFrame) and isinstance(raw_frame_r, dai.ImgFrame)
         arrival_time = dai.Clock.now().total_seconds()
         frame_l = self.cam_l.process_frame(raw_frame_l, arrival_time)
         frame_r = self.cam_r.process_frame(raw_frame_r, arrival_time)

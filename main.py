@@ -218,6 +218,7 @@ class MonoCamera:
         self.numeric_resolution = RESOLUTION_MAP[resolution]
         self.prev_frame_arrival_time = -1.0
         self.cropper = Cropper(self.numeric_resolution)
+        self.name = name
 
         cam = pipeline.create(dai.node.MonoCamera)
         assert isinstance(cam, dai.node.MonoCamera)
@@ -229,6 +230,8 @@ class MonoCamera:
         assert isinstance(manip, dai.node.ImageManip)
         manip.inputImage.setBlocking(False)
         manip.inputImage.setQueueSize(1)
+        manip.inputConfig.setBlocking(False)
+        manip.inputConfig.setQueueSize(1)
         # Allocate an output buffer large enough for the biggest possible output
         # (the full frame, produced when the crop is unset).
         manip.setMaxOutputFrameSize(self.numeric_resolution[0] * self.numeric_resolution[1])
@@ -249,6 +252,7 @@ class MonoCamera:
         self.cam_ctrl.setStreamName(self.cam_ctrl_q_name)
         self.cam_ctrl.out.link(cam.inputControl)
 
+        self.current_crop = CropRect(0, 0, self.numeric_resolution[0], self.numeric_resolution[1])
         self.rect_map_x = None
         self.rect_map_y = None
 
@@ -277,6 +281,10 @@ class MonoCamera:
         self.set_crop(device, self.cropper.get_crop_rect(x, y))
 
     def set_crop(self, device: dai.Device, rect: CropRect):
+        if rect == self.current_crop:
+            return
+        self.current_crop = rect
+        print(f"Set crop {self.name}: {rect}")
         msg = dai.ImageManipConfig()
         x_min = rect.x_min / self.numeric_resolution[0]
         y_min = rect.y_min / self.numeric_resolution[1]

@@ -292,11 +292,6 @@ class MonoCamera:
         x_max = rect.x_max / self.numeric_resolution[0]
         y_max = rect.y_max / self.numeric_resolution[1]
         msg.setCropRect(x_min, y_min, x_max, y_max)
-        # Force the output to the crop's exact native pixel size to avoid
-        # stretching (zoom) or rounding-induced squishing.
-        width = int(round(rect.x_max - rect.x_min))
-        height = int(round(rect.y_max - rect.y_min))
-        msg.setResize(width, height)
         device.getInputQueue(self.manip_ctrl_q_name).send(msg)
 
     def unset_crop(self, device: dai.Device):

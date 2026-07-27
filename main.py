@@ -1,4 +1,3 @@
-import collections
 import math
 import sys
 import json
@@ -24,26 +23,6 @@ RESOLUTION_MAP = {
 }
 CAMERA_RESOLUTION_NUMERIC = RESOLUTION_MAP[CAMERA_RESOLUTION]
 CAMERA_FPS = 75
-# Above this speed (in cm/s) a 3D position change is considered too fast to
-# plausibly be the head of a person, and lowers the temporal confidence. The
-# speed is estimated via a smoothed (least-squares) fit over the whole window
-# rather than raw frame-to-frame differences, so it is not dominated by
-# per-frame measurement noise.
-MAX_PLAUSIBLE_HUMAN_SPEED_CM_S = 600.0
-# Above this RMS deviation (in cm) of the actual positions from the smoothed
-# (least-squares fit) trajectory, the motion is considered too erratic
-# (jumpy/inconsistent) to plausibly be a person's head, as opposed to e.g. a
-# mismatched detection jumping between unrelated candidates.
-MAX_PLAUSIBLE_HUMAN_JERK_CM = 6.0
-# Below this standard deviation (in cm) of the 3D position over the sliding
-# window, the detection is considered to be a static background element (e.g.
-# a reflection) rather than a tracked, moving LED, and lowers the temporal
-# confidence. It is small enough that the natural sway/jitter of a person
-# standing still is not mistaken for a static background element.
-MIN_PLAUSIBLE_HUMAN_JITTER_CM = 0.04
-# The number of consecutive frames without a detection after which the
-# temporal confidence drops to zero.
-MAX_CONSECUTIVE_MISSES = 100
 STEREO_MATCH_CONF_THRESHOLD = .5
 
 
@@ -86,141 +65,6 @@ class Frame:
     frame_time: float
     time_of_capture: float
     time_of_arrival: float
-
-
-@dataclass(frozen=True)
-class DetectionRecord:
-    """A single matched detection, as produced by ``match_candidates``.
-
-    ``point_l``/``point_r`` are the 2D detection positions (in full-frame image
-    pixels, origin at top-left) in the left/right camera images, ``timestamp``
-    is the capture time of the frame pair, ``pos_3d`` is the triangulated 3D
-    position, and ``confidence`` is the match confidence.
-    """
-    point_l: typing.Tuple[float, float]
-    point_r: typing.Tuple[float, float]
-    timestamp: float
-    pos_3d: np.ndarray
-    confidence: float
-
-
-class DetectionHistory:
-    """Keeps a sliding window of recent detections and predicts where the
-    tracked point will be in each camera image a short time ahead.
-
-    The prediction is a linear extrapolation (least-squares fit of position
-    over time) of the recent 2D detections in each camera, which reacts faster
-    to a moving target than simply using the latest detected position.
-    """
-
-    def __init__(self, max_len: int = 20):
-        self.records: typing.Deque[DetectionRecord] = collections.deque(maxlen=max_len)
-        self.num_consecutive_misses = 0
-
-    def add(self, record: DetectionRecord) -> None:
-        self.records.append(record)
-        self.num_consecutive_misses = 0
-
-    def record_miss(self) -> None:
-        self.num_consecutive_misses += 1
-
-    def clear(self) -> None:
-        self.records.clear()
-        self.num_consecutive_misses = 0
-
-    def compute_temporal_confidence(self) -> float:
-        """Estimate, as a value in ``[0, 1]``, how likely it is that the LED
-        attached to the tracked person's head is currently being tracked
-        correctly, based on the sliding window of recent detections.
-
-        This combines three signals:
-          * The match confidence of each record, biased towards more recent
-            detections (an exponentially weighted average).
-          * The plausibility of the implied 3D motion: since the LED is worn
-            on a person's head, both moving faster than a person's head
-            plausibly can, and moving erratically/inconsistently (as opposed
-            to a smooth trajectory), indicate a wrong match rather than a
-            real, tracked person. The motion is estimated with a smoothed
-            (least-squares) fit over the whole window rather than raw
-            frame-to-frame differences, so that ordinary per-frame
-            measurement noise is not mistaken for implausible motion.
-          * The temporal variance of the 3D position: a real, tracked person
-            (even standing still) exhibits some jitter/sway, while a nearly
-            perfectly static position over the whole window is a sign that a
-            static background element (e.g. a reflection) is being tracked
-            instead.
-        """
-        if not self.records:
-            return 0.0
-
-        n = len(self.records)
-        confidences = np.array([r.confidence for r in self.records])
-
-        # Exponentially weighted average, biased towards the most recent
-        # detections.
-        weights = np.array([2.0 ** i for i in range(n)])
-        weights /= weights.sum()
-        weighted_confidence = float(np.dot(weights, confidences))
-
-        if n < 3:
-            # Not enough history to reliably judge motion plausibility or
-            # temporal variance; fall back to the confidence-only estimate,
-            # still penalized by recent misses.
-            miss_penalty = logistic_interpolation(
-                self.num_consecutive_misses, ideal=0, cutoff=MAX_CONSECUTIVE_MISSES
-            )
-            return max(0.0, min(1.0, weighted_confidence * miss_penalty))
-
-        positions = np.array([r.pos_3d for r in self.records])
-        times = np.array([r.timestamp for r in self.records])
-
-        # Fit a smooth (constant-velocity) trajectory to the window, per axis,
-        # so that speed/erraticness are not dominated by noise between any two
-        # individual frames.
-        fitted = np.empty_like(positions)
-        velocity = np.empty(3)
-        for axis in range(3):
-            a, b = np.polyfit(times, positions[:, axis], 1)
-            velocity[axis] = a
-            fitted[:, axis] = a * times + b
-
-        # Motion plausibility: the smoothed speed should stay within what a
-        # person's head can plausibly achieve.
-        speed = float(np.linalg.norm(velocity))
-        speed_plausibility = logistic_interpolation(
-            speed, ideal=0.0, cutoff=MAX_PLAUSIBLE_HUMAN_SPEED_CM_S
-        )
-
-        # Erraticness: large deviations of the actual positions from the
-        # smoothed trajectory indicate jumpy, inconsistent motion (e.g. a
-        # detection jumping between unrelated candidates) rather than a
-        # person's continuous movement.
-        jerk_rms = float(np.sqrt(np.mean(np.sum((positions - fitted) ** 2, axis=1))))
-        smoothness_plausibility = logistic_interpolation(
-            jerk_rms, ideal=0.0, cutoff=MAX_PLAUSIBLE_HUMAN_JERK_CM
-        )
-
-        # Static-background detection: very little variance around the mean
-        # position over the window suggests a static element rather than a
-        # (possibly still, but never perfectly static) tracked person.
-        mean_pos = positions.mean(axis=0)
-        jitter_std = float(np.std(np.linalg.norm(positions - mean_pos, axis=1)))
-        not_static = logistic_interpolation(
-            jitter_std, ideal=MIN_PLAUSIBLE_HUMAN_JITTER_CM, cutoff=0
-        )
-
-        miss_penalty = logistic_interpolation(
-            self.num_consecutive_misses, ideal=0, cutoff=MAX_CONSECUTIVE_MISSES
-        )
-
-        temporal_confidence = (
-            weighted_confidence *
-            speed_plausibility *
-            smoothness_plausibility *
-            not_static *
-            miss_penalty
-        )
-        return max(0.0, min(1.0, temporal_confidence))
 
 class MonoCamera:
     def __init__(self, pipeline: dai.Pipeline, socket: dai.CameraBoardSocket, name: str, sync: dai.node.Sync,
@@ -503,7 +347,6 @@ class Worker(QtCore.QThread):
     centroid_ready = QtCore.Signal(bool, float, float, float, float)
     position_ready = QtCore.Signal(np.ndarray)
     stats_ready = QtCore.Signal(float, float, float, float, float)
-    confidence_ready = QtCore.Signal(float)
 
     def __init__(self, config):
         super().__init__()
@@ -522,9 +365,6 @@ class Worker(QtCore.QThread):
         }
         self.settings_changed = True
         self.blob_settings_changed = True
-        self.last_pos = None
-        self.last_pos_time = None
-        self.detection_history = DetectionHistory()
 
     def run(self):
         with StereoCamera(CAMERA_RESOLUTION, CAMERA_FPS) as stereo_cam:
@@ -554,34 +394,20 @@ class Worker(QtCore.QThread):
                 found_correspondence = match is not None
 
                 if found_correspondence:
-                    cX_l, cY_l_top, _ = match['left']
-                    cX_r, cY_r_top, _ = match['right']
+                    cX_l, cY_l, _ = match['left']
+                    cX_r, cY_r, _ = match['right']
                     tracked_pos = match['pos_3d']
-                    self.last_pos = tracked_pos
-                    self.last_pos_time = frame_l.time_of_capture
 
                     frame_h = CAMERA_RESOLUTION_NUMERIC[1]
                     # For UI display on vertically flipped images
-                    cY_l = frame_h - cY_l_top
-                    cY_r = frame_h - cY_r_top
-
-                    self.detection_history.add(DetectionRecord(
-                        point_l=(cX_l, cY_l_top),
-                        point_r=(cX_r, cY_r_top),
-                        timestamp=frame_l.time_of_capture,
-                        pos_3d=tracked_pos,
-                        confidence=match['confidence'],
-                    ))
+                    cY_l_ui = frame_h - cY_l
+                    cY_r_ui = frame_h - cY_r
                 else:
-                    self.detection_history.record_miss()
-                    cX_l = cY_l = cX_r = cY_r = -1.0
+                    cX_l = cY_l_ui = cX_r = cY_r_ui = -1.0
 
 
                 self.frame_ready.emit(frame_l.frame.copy(), frame_r.frame.copy())
-                self.centroid_ready.emit(found_correspondence, cX_l, cY_l, cX_r, cY_r)
-
-                temporal_confidence = self.detection_history.compute_temporal_confidence()
-                self.confidence_ready.emit(temporal_confidence)
+                self.centroid_ready.emit(found_correspondence, cX_l, cY_l_ui, cX_r, cY_r_ui)
 
                 latency_arrival = (frame_l.time_of_arrival - frame_l.time_of_capture) * 1000
                 ts_diff_us = abs(frame_l.time_of_capture - frame_r.time_of_capture) * 1_000_000
@@ -732,17 +558,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pos_label = QtWidgets.QLabel("XYZ: N/A")
         controls_layout.addWidget(self.pos_label)
 
-        controls_layout.addWidget(QtWidgets.QLabel("Tracking confidence:"))
-        self.confidence_plot = pg.PlotWidget()
-        self.confidence_plot.setFixedHeight(80)
-        self.confidence_plot.setMouseEnabled(x=False, y=False)
-        self.confidence_plot.hideAxis('bottom')
-        self.confidence_plot.setYRange(0.0, 1.0, padding=0)
-        self.confidence_plot.setXRange(-1.0, 1.0, padding=0)
-        self.confidence_bar = pg.BarGraphItem(x=[0], height=[0.0], width=1.2, brush='g')
-        self.confidence_plot.addItem(self.confidence_bar)
-        controls_layout.addWidget(self.confidence_plot)
-
         controls_layout.addSpacing(10)
         controls_layout.addWidget(QtWidgets.QLabel("<b>Timing Info</b>"))
         self.frame_time_label = QtWidgets.QLabel("Frame time: N/A")
@@ -862,7 +677,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.centroid_ready.connect(self.on_centroid)
         self.worker.position_ready.connect(self.on_position)
         self.worker.stats_ready.connect(self.on_stats)
-        self.worker.confidence_ready.connect(self.on_confidence)
         self.worker.start()
 
     def update_exposure(self, val):
@@ -952,14 +766,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.processing_latency_label.setText("Processing latency: N/A")
             self.total_latency_label.setText("Total latency: N/A")
         self.lr_diff_label.setText(f"L-R frame diff: {ts_diff:.1f}µs")
-
-    @QtCore.Slot(float)
-    def on_confidence(self, confidence):
-        confidence = max(0.0, min(1.0, confidence))
-        self.confidence_bar.setOpts(height=[confidence])
-        # Color the bar from red (low confidence) to green (high confidence).
-        color = pg.mkColor(int(255 * (1.0 - confidence)), int(255 * confidence), 0)
-        self.confidence_bar.setOpts(brush=color)
 
     def closeEvent(self, event):
         self.worker.stop()

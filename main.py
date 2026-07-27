@@ -340,8 +340,7 @@ def match_candidates(candidates_l, candidates_r, stereo_cam: StereoCamera, conf_
 
 
 def map_open_cv_to_output_coords(pos: np.ndarray) -> np.ndarray:
-    pos[1] *= -1  # Open CV is Y down. I want the output to be Y up.
-    return pos
+    return np.array([pos[0], -pos[1], pos[2]])
 
 
 class Worker(QtCore.QThread):
@@ -819,7 +818,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(np.ndarray)
     def on_position(self, pos):
-        map_open_cv_to_output_coords(pos)
+        pos = map_open_cv_to_output_coords(pos)
         self.pos_label.setText(f"XYZ: {pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}")
         # Flip z and y to transform to the space of the UI view
         self.pos_marker.setData(pos=np.array([[pos[0], pos[2], pos[1]]]))

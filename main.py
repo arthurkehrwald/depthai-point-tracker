@@ -2,8 +2,6 @@ import math
 import sys
 import json
 import socket
-import time
-
 import numpy as np
 import cv2
 import depthai as dai
@@ -11,7 +9,6 @@ import typing
 from pathlib import Path
 from dataclasses import dataclass
 from types import TracebackType
-
 from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
@@ -52,8 +49,9 @@ def save_config(config):
 @dataclass(frozen=True)
 class CameraSocketParams:
     projection: np.ndarray
-    rectify_map_x: np.ndarray
-    rectify_map_y: np.ndarray
+    intrinsics: np.ndarray
+    distortion: np.ndarray
+    rotation: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -62,6 +60,7 @@ class Frame:
     frame_time: float
     time_of_capture: float
     time_of_arrival: float
+
 
 class MonoCamera:
     def __init__(self, pipeline: dai.Pipeline, socket: dai.CameraBoardSocket, name: str, sync: dai.node.Sync,
@@ -77,25 +76,26 @@ class MonoCamera:
         sync.inputs[name].setMaxSize(1)
         self.cam_ctrl_q = cam.inputControl.createInputQueue()
 
-        self.rect_map_x = None
-        self.rect_map_y = None
+        self.params = None
 
-    def set_rectification_maps(self, rect_map_x: np.ndarray, rect_map_y: np.ndarray):
-        self.rect_map_x = rect_map_x
-        self.rect_map_y = rect_map_y
+    def set_params(self, params: CameraSocketParams):
+        self.params = params
+
+    def rectify_point(self, x: float, y: float) -> typing.Tuple[float, float]:
+        if self.params is None:
+            return x, y
+        # cv2.undistortPoints expects a 1xNx2 or Nx1x2 array
+        pt = np.array([[[x, y]]], dtype=np.float32)
+        undistorted = cv2.undistortPoints(pt, self.params.intrinsics, self.params.distortion,
+                                          R=self.params.rotation, P=self.params.projection)
+        return undistorted[0][0][0], undistorted[0][0][1]
 
     def process_frame(self, frame: dai.ImgFrame, arrival_time: float):
         frame_time_ms = (arrival_time - self.prev_frame_arrival_time) * 1000
         self.prev_frame_arrival_time = arrival_time
         capture_time = frame.getTimestamp().total_seconds()
         cv_frame = frame.getCvFrame()
-        if self.rect_map_x is not None and self.rect_map_y is not None:
-            rect_frame = cv2.remap(cv_frame, self.rect_map_x, self.rect_map_y,
-                                       cv2.INTER_LINEAR)
-        else:
-            print("WARNING: Rectification map not set. Will not rectify.")
-            rect_frame = cv_frame
-        return Frame(rect_frame, frame_time_ms, capture_time, arrival_time)
+        return Frame(cv_frame, frame_time_ms, capture_time, arrival_time)
 
     def set_exposure(self, exp_time: int, sens_iso: int) -> None:
         msg = dai.CameraControl()
@@ -124,8 +124,8 @@ class StereoCamera:
         # In v3, we can get calibration directly from the pipeline if it's started
         # and has a device. Or we can use pipeline.getDevice().readCalibration()
         self.cam_params_l, self.cam_params_r = self.compute_stereo_rectification()
-        self.cam_l.set_rectification_maps(self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y)
-        self.cam_r.set_rectification_maps(self.cam_params_r.rectify_map_x, self.cam_params_r.rectify_map_y)
+        self.cam_l.set_params(self.cam_params_l)
+        self.cam_r.set_params(self.cam_params_r)
         return self
 
     def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None,
@@ -177,15 +177,8 @@ class StereoCamera:
             self.resolution,
             cv2.CV_16SC2
         )
-        rectify_map_r_x, rectify_map_r_y = cv2.initUndistortRectifyMap(
-            intrinsics_r, distortion_r,
-            rotation_r, projection_r,
-            self.resolution,
-            cv2.CV_16SC2
-        )
-
-        return (CameraSocketParams(projection_l, rectify_map_l_x, rectify_map_l_y),
-                CameraSocketParams(projection_r, rectify_map_r_x, rectify_map_r_y))
+        return (CameraSocketParams(projection_l, intrinsics_l, distortion_l, rotation_l),
+                CameraSocketParams(projection_r, intrinsics_r, distortion_r, rotation_r))
 
     def get_stereo_frames(self) -> typing.Tuple[Frame, Frame]:
         message_group = self.x_out_q.get()
@@ -303,13 +296,18 @@ def match_candidates(candidates_l, candidates_r, stereo_cam: StereoCamera):
     best_match = None
     highest_confidence = 0
 
-    for x_l, y_l, s_l in candidates_l:
-        for x_r, y_r, s_r in candidates_r:
+    for candidate_l in candidates_l:
+        x_l_raw, y_l_raw, s_l = candidate_l['raw']
+        x_l_rect, y_l_rect = candidate_l['rect']
+        for candidate_r in candidates_r:
+            x_r_raw, y_r_raw, s_r = candidate_r['raw']
+            x_r_rect, y_r_rect = candidate_r['rect']
+
             # 1. Epipolar constraint: Corresponding points must have very similar Y-coordinates in image space
-            y_pixel_diff = abs(y_l - y_r)
+            y_pixel_diff = abs(y_l_rect - y_r_rect)
 
             # 2. Plausibility of 3D position
-            pos_3d = stereo_cam.triangulate((x_l, y_l), (x_r, y_r))
+            pos_3d = stereo_cam.triangulate((x_l_rect, y_l_rect), (x_r_rect, y_r_rect))
 
             # 3. Also consider blob size similarity
             size_ratio = min(s_l, s_r) / max(s_l, s_r, 1e-6)
@@ -330,16 +328,18 @@ def match_candidates(candidates_l, candidates_r, stereo_cam: StereoCamera):
             if conf > highest_confidence and conf > STEREO_MATCH_CONF_THRESHOLD:
                 highest_confidence = conf
                 best_match = {
-                    'left': (x_l, y_l, s_l),
-                    'right': (x_r, y_r, s_r),
+                    'left_raw': (x_l_raw, y_l_raw, s_l),
+                    'right_raw': (x_r_raw, y_r_raw, s_r),
                     'pos_3d': pos_3d,
                     'confidence': highest_confidence
                 }
     return best_match
 
+
 def map_open_cv_to_output_coords(pos: np.ndarray) -> np.ndarray:
-    pos[1] *= -1 # Open CV is Y down. I want the output to be Y up.
+    pos[1] *= -1  # Open CV is Y down. I want the output to be Y up.
     return pos
+
 
 class Worker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray, np.ndarray)
@@ -387,22 +387,31 @@ class Worker(QtCore.QThread):
 
                 frame_l, frame_r = stereo_cam.get_stereo_frames()
 
-                start = time.monotonic()
-                candidates_l = blob_detector.detect_candidates(frame_l.frame)
-                candidates_r = blob_detector.detect_candidates(frame_r.frame)
-                delta = time.monotonic() - start
-                print(f"Blob detection took {(delta * 1000):2f} ms")
+                raw_candidates_l = blob_detector.detect_candidates(frame_l.frame)
+                raw_candidates_r = blob_detector.detect_candidates(frame_r.frame)
+
+                candidates_l = []
+                for x, y, s in raw_candidates_l:
+                    candidates_l.append({
+                        'raw': (x, y, s),
+                        'rect': stereo_cam.cam_l.rectify_point(x, y)
+                    })
+                candidates_r = []
+                for x, y, s in raw_candidates_r:
+                    candidates_r.append({
+                        'raw': (x, y, s),
+                        'rect': stereo_cam.cam_r.rectify_point(x, y)
+                    })
 
                 match = match_candidates(candidates_l, candidates_r, stereo_cam)
                 found_correspondence = match is not None
 
                 if found_correspondence:
-                    cX_l, cY_l, _ = match['left']
-                    cX_r, cY_r, _ = match['right']
+                    cX_l, cY_l, _ = match['left_raw']
+                    cX_r, cY_r, _ = match['right_raw']
                     tracked_pos = match['pos_3d']
                 else:
-                    cX_l = cY_l = cX_r = cY_r= -1.0
-
+                    cX_l = cY_l = cX_r = cY_r = -1.0
 
                 self.frame_ready.emit(frame_l.frame.copy(), frame_r.frame.copy())
                 self.centroid_ready.emit(found_correspondence, cX_l, cY_l, cX_r, cY_r)

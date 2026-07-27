@@ -333,6 +333,9 @@ def match_candidates(candidates_l, candidates_r, stereo_cam: StereoCamera):
                 }
     return best_match
 
+def map_open_cv_to_output_coords(pos: np.ndarray) -> np.ndarray:
+    pos[1] *= -1 # Open CV is Y down. I want the output to be Y up.
+    return pos
 
 class Worker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray, np.ndarray)
@@ -389,17 +392,12 @@ class Worker(QtCore.QThread):
                     cX_l, cY_l, _ = match['left']
                     cX_r, cY_r, _ = match['right']
                     tracked_pos = match['pos_3d']
-
-                    frame_h = CAMERA_RESOLUTION[1]
-                    # For UI display on vertically flipped images
-                    cY_l_ui = frame_h - cY_l
-                    cY_r_ui = frame_h - cY_r
                 else:
-                    cX_l = cY_l_ui = cX_r = cY_r_ui = -1.0
+                    cX_l = cY_l = cX_r = cY_r= -1.0
 
 
                 self.frame_ready.emit(frame_l.frame.copy(), frame_r.frame.copy())
-                self.centroid_ready.emit(found_correspondence, cX_l, cY_l_ui, cX_r, cY_r_ui)
+                self.centroid_ready.emit(found_correspondence, cX_l, cY_l, cX_r, cY_r)
 
                 latency_arrival = (frame_l.time_of_arrival - frame_l.time_of_capture) * 1000
                 ts_diff_us = abs(frame_l.time_of_capture - frame_r.time_of_capture) * 1_000_000
@@ -413,7 +411,7 @@ class Worker(QtCore.QThread):
                     self.position_ready.emit(tracked_pos)
 
                     tracked_pos_with_empty_rotation = np.zeros(6)
-                    tracked_pos_with_empty_rotation[:3] = tracked_pos
+                    tracked_pos_with_empty_rotation[:3] = map_open_cv_to_output_coords(tracked_pos)
                     sock.sendto(tracked_pos_with_empty_rotation.tobytes(), (IP, PORT))
 
                 self.stats_ready.emit(frame_l.frame_time, latency_arrival, latency_calc, latency_total, ts_diff_us)
@@ -712,6 +710,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_centroid(self, found_correspondence: bool, x_l, y_l, x_r, y_r):
         # Update Left
         if found_correspondence:
+            frame_h = CAMERA_RESOLUTION[1]
+            # OpenCV is Y down, UI is Y up
+            y_l = frame_h - y_l
+            y_r = frame_h - y_r
             self.crosshair_v_l.setPos(x_l)
             self.crosshair_h_l.setPos(y_l)
             self.crosshair_v_l.show()
@@ -732,9 +734,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(np.ndarray)
     def on_position(self, pos):
+        map_open_cv_to_output_coords(pos)
         self.pos_label.setText(f"XYZ: {pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}")
-        # OpenCV Y is down, so negate it for GL view Z (up)
-        self.pos_marker.setData(pos=np.array([[pos[0], pos[2], -pos[1]]]))
+        # Flip z and y to transform to the space of the UI view
+        self.pos_marker.setData(pos=np.array([[pos[0], pos[2], pos[1]]]))
         self.data_x.append(pos[0])
         self.data_y.append(pos[1])
         self.data_z.append(pos[2])

@@ -2,6 +2,8 @@ import math
 import sys
 import json
 import socket
+import time
+
 import numpy as np
 import cv2
 import depthai as dai
@@ -33,6 +35,7 @@ def load_config():
         "threshold": 0.9,
         "blob_min_threshold": 80,
         "blob_max_threshold": 255,
+        "blob_threshold_step": 10,
         "blob_min_area": 20,
         "blob_max_area": 1000,
         "blob_min_circularity": 0.7,
@@ -223,6 +226,7 @@ class BlobDetector:
         params = cv2.SimpleBlobDetector.Params()
         params.minThreshold = config.get("blob_min_threshold", 80)
         params.maxThreshold = config.get("blob_max_threshold", 255)
+        params.thresholdStep = config.get("blob_threshold_step", 10)
         params.maxThreshold = max(params.maxThreshold, params.minThreshold)
         params.filterByColor = True
         params.blobColor = 255
@@ -352,6 +356,7 @@ class Worker(QtCore.QThread):
         self.blob_params = {
             "blob_min_threshold": config.get("blob_min_threshold", 80),
             "blob_max_threshold": config.get("blob_max_threshold", 255),
+            "blob_threshold_step": config.get("blob_threshold_step", 10),
             "blob_min_area": config.get("blob_min_area", 20),
             "blob_max_area": config.get("blob_max_area", 1000),
             "blob_min_circularity": config.get("blob_min_circularity", 0.7),
@@ -382,8 +387,11 @@ class Worker(QtCore.QThread):
 
                 frame_l, frame_r = stereo_cam.get_stereo_frames()
 
+                start = time.monotonic()
                 candidates_l = blob_detector.detect_candidates(frame_l.frame)
                 candidates_r = blob_detector.detect_candidates(frame_r.frame)
+                delta = time.monotonic() - start
+                print(f"Blob detection took {(delta * 1000):2f} ms")
 
                 match = match_candidates(candidates_l, candidates_r, stereo_cam)
                 found_correspondence = match is not None
@@ -484,6 +492,13 @@ class MainWindow(QtWidgets.QMainWindow):
         blob_thresh_h.addWidget(self.blob_min_thresh_spin)
         blob_thresh_h.addWidget(self.blob_max_thresh_spin)
         controls_layout.addLayout(blob_thresh_h)
+
+        # Blob Threshold Step
+        controls_layout.addWidget(QtWidgets.QLabel("Blob Threshold Step:"))
+        self.blob_thresh_step_spin = QtWidgets.QSpinBox()
+        self.blob_thresh_step_spin.setRange(1, 100)
+        self.blob_thresh_step_spin.setValue(self.config.get('blob_threshold_step', 10))
+        controls_layout.addWidget(self.blob_thresh_step_spin)
 
         # Blob Min/Max Area
         controls_layout.addWidget(QtWidgets.QLabel("Blob Area (Min/Max):"))
@@ -652,6 +667,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.blob_min_thresh_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_threshold", v))
         self.blob_max_thresh_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_max_threshold", v))
+        self.blob_thresh_step_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_threshold_step", v))
         self.blob_min_area_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_area", v))
         self.blob_max_area_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_max_area", v))
         self.blob_circ_slider.valueChanged.connect(lambda v: self.blob_circ_spin.setValue(v / 100.0))

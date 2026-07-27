@@ -15,13 +15,7 @@ import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 
 CONFIG_FILE = "config.json"
-CAMERA_RESOLUTION = dai.MonoCameraProperties.SensorResolution.THE_720_P
-RESOLUTION_MAP = {
-    dai.MonoCameraProperties.SensorResolution.THE_800_P: (1280, 800),
-    dai.MonoCameraProperties.SensorResolution.THE_720_P: (1280, 720),
-    dai.MonoCameraProperties.SensorResolution.THE_400_P: (640, 400)
-}
-CAMERA_RESOLUTION_NUMERIC = RESOLUTION_MAP[CAMERA_RESOLUTION]
+CAMERA_RESOLUTION = (1280, 720)
 CAMERA_FPS = 75
 STEREO_MATCH_CONF_THRESHOLD = .5
 
@@ -68,14 +62,13 @@ class Frame:
 
 class MonoCamera:
     def __init__(self, pipeline: dai.Pipeline, socket: dai.CameraBoardSocket, name: str, sync: dai.node.Sync,
-                 resolution: dai.MonoCameraProperties.SensorResolution, fps: int):
+                 resolution: typing.Tuple[int, int], fps: int):
         self.resolution = resolution
-        self.numeric_resolution = RESOLUTION_MAP[resolution]
         self.prev_frame_arrival_time = -1.0
         self.name = name
 
         cam = pipeline.create(dai.node.Camera).build(socket)
-        self.cam_out = cam.requestOutput(self.numeric_resolution, fps=fps)
+        self.cam_out = cam.requestOutput(self.resolution, fps=fps)
         self.cam_out.link(sync.inputs[name])
         sync.inputs[name].setBlocking(False)
         sync.inputs[name].setMaxSize(1)
@@ -109,10 +102,9 @@ class MonoCamera:
 
 class StereoCamera:
     def __init__(
-            self, resolution: dai.MonoCameraProperties.SensorResolution, fps: int
+            self, resolution: typing.Tuple[int, int], fps: int
     ):
         self.resolution = resolution
-        self.numeric_resolution = RESOLUTION_MAP[resolution]
         self.fps = fps
 
     def __enter__(self) -> "StereoCamera":
@@ -142,12 +134,12 @@ class StereoCamera:
 
         intrinsics_l = np.array(
             calibration.getCameraIntrinsics(
-                dai.CameraBoardSocket.CAM_B, self.numeric_resolution[0], self.numeric_resolution[1]
+                dai.CameraBoardSocket.CAM_B, self.resolution[0], self.resolution[1]
             ),
         )
         intrinsics_r = np.array(
             calibration.getCameraIntrinsics(
-                dai.CameraBoardSocket.CAM_C, self.numeric_resolution[0], self.numeric_resolution[1]
+                dai.CameraBoardSocket.CAM_C, self.resolution[0], self.resolution[1]
             ),
         )
 
@@ -169,7 +161,7 @@ class StereoCamera:
         rotation_l, rotation_r, projection_l, projection_r, _, _, _ = cv2.stereoRectify(
             intrinsics_l, distortion_l.flatten(),
             intrinsics_r, distortion_r.flatten(),
-            imageSize=self.numeric_resolution,
+            imageSize=self.resolution,
             R=l_to_r_rotation,
             T=l_to_r_translation,
             flags=cv2.CALIB_ZERO_DISPARITY,
@@ -179,13 +171,13 @@ class StereoCamera:
         rectify_map_l_x, rectify_map_l_y = cv2.initUndistortRectifyMap(
             intrinsics_l, distortion_l,
             rotation_l, projection_l,
-            self.numeric_resolution,
+            self.resolution,
             cv2.CV_16SC2
         )
         rectify_map_r_x, rectify_map_r_y = cv2.initUndistortRectifyMap(
             intrinsics_r, distortion_r,
             rotation_r, projection_r,
-            self.numeric_resolution,
+            self.resolution,
             cv2.CV_16SC2
         )
 
@@ -398,7 +390,7 @@ class Worker(QtCore.QThread):
                     cX_r, cY_r, _ = match['right']
                     tracked_pos = match['pos_3d']
 
-                    frame_h = CAMERA_RESOLUTION_NUMERIC[1]
+                    frame_h = CAMERA_RESOLUTION[1]
                     # For UI display on vertically flipped images
                     cY_l_ui = frame_h - cY_l
                     cY_r_ui = frame_h - cY_r
@@ -617,7 +609,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # left and right previews have the same shape/aspect ratio right from
         # startup (before any real frame has been received from the worker),
         # and lock their views together so they always stay in sync.
-        blank_w, blank_h = CAMERA_RESOLUTION_NUMERIC
+        blank_w, blank_h = CAMERA_RESOLUTION
         blank_frame = np.zeros((blank_w, blank_h), dtype=np.uint8)
         # Disable pyqtgraph's automatic level (brightness/contrast) scaling so the
         # preview reflects the camera's actual exposure instead of being

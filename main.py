@@ -23,7 +23,7 @@ RESOLUTION_MAP = {
     dai.MonoCameraProperties.SensorResolution.THE_400_P: (640, 400)
 }
 CAMERA_RESOLUTION_NUMERIC = RESOLUTION_MAP[CAMERA_RESOLUTION]
-CAMERA_FPS = 60
+CAMERA_FPS = 75
 # Above this speed (in cm/s) a 3D position change is considered too fast to
 # plausibly be the head of a person, and lowers the temporal confidence. The
 # speed is estimated via a smoothed (least-squares) fit over the whole window
@@ -282,6 +282,7 @@ class StereoCamera:
 
     def __enter__(self) -> "StereoCamera":
         self.pipeline = dai.Pipeline()
+        self.pipeline.setXLinkChunkSize(0)
         sync = self.pipeline.create(dai.node.Sync)
         assert isinstance(sync, dai.node.Sync)
         self.cam_l = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_B, "left", sync, self.resolution, self.fps)

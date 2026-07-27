@@ -26,7 +26,7 @@ CAMERA_RESOLUTION_NUMERIC = RESOLUTION_MAP[CAMERA_RESOLUTION]
 CAMERA_FPS = 100
 # How far ahead (in seconds) the crop position is predicted, to compensate for
 # the time it takes for a crop change to take effect.
-CROP_PREDICTION_LOOKAHEAD_S = 0.0
+CROP_PREDICTION_LOOKAHEAD_S = 0
 # Above this speed (in cm/s) a 3D position change is considered too fast to
 # plausibly be the head of a person, and lowers the temporal confidence. The
 # speed is estimated via a smoothed (least-squares) fit over the whole window
@@ -43,10 +43,11 @@ MAX_PLAUSIBLE_HUMAN_JERK_CM = 6.0
 # a reflection) rather than a tracked, moving LED, and lowers the temporal
 # confidence. It is small enough that the natural sway/jitter of a person
 # standing still is not mistaken for a static background element.
-MIN_PLAUSIBLE_HUMAN_JITTER_CM = 0.02
+MIN_PLAUSIBLE_HUMAN_JITTER_CM = 0.04
 # The number of consecutive frames without a detection after which the
 # temporal confidence drops to zero.
-MAX_CONSECUTIVE_MISSES = 20
+MAX_CONSECUTIVE_MISSES = 100
+STEREO_MATCH_CONF_THRESHOLD = .5
 
 
 def load_config():
@@ -146,10 +147,10 @@ class DetectionHistory:
         recent detection, based on the recorded history. Returns ``None`` if
         there is no history yet.
         """
-        if not self.records or lookahead == 0.0:
+        if not self.records or self.num_consecutive_misses > 20:
             return None
-        if len(self.records) == 1:
-            record = self.records[0]
+        if len(self.records) == 1 or CROP_PREDICTION_LOOKAHEAD_S == 0.0:
+            record = self.records[-1]
             return record.point_l, record.point_r
 
         times = np.array([r.timestamp for r in self.records])
@@ -287,7 +288,7 @@ class Cropper:
     short because of their slightly different sizes.
     """
 
-    def __init__(self, resolution: typing.Tuple[int, int], cols: int = 5, rows: int = 4,
+    def __init__(self, resolution: typing.Tuple[int, int], cols: int = 8, rows: int = 6,
                  overlap: float = 1.0 / 2.0, size_step: int = 4, margin: int = 4):
         if cols < 1 or rows < 1:
             raise ValueError("cols and rows must be >= 1")
@@ -728,15 +729,17 @@ def match_candidates(candidates_l, candidates_r, stereo_cam: StereoCamera):
             # 4. And absolute size
             size = s_l + s_r
 
+            weights = [10, 1, 1, 1, 1, 1]
+
             # Combined score using logistic interpolation
             conf = np.average([logistic_interpolation(y_pixel_diff, ideal=0, cutoff=3),
                                logistic_interpolation(pos_3d[0], ideal=0, cutoff=-200, cutoff2=200),
                                logistic_interpolation(pos_3d[1], ideal=0, cutoff=-100, cutoff2=100),
                                logistic_interpolation(pos_3d[2], ideal=100, cutoff=0, cutoff2=300),
                                logistic_interpolation(size_ratio, ideal=1, cutoff=0),
-                               logistic_interpolation(size, ideal=20, cutoff=5)])
+                               logistic_interpolation(size, ideal=20, cutoff=5)], weights=weights)
 
-            if conf > highest_confidence:
+            if conf > highest_confidence and conf > STEREO_MATCH_CONF_THRESHOLD:
                 highest_confidence = conf
                 best_match = {
                     'left': (x_l, y_l, s_l),
@@ -850,8 +853,8 @@ class Worker(QtCore.QThread):
                 self.confidence_ready.emit(temporal_confidence)
 
                 stereo_cam.track_crop(
-                    s_l, pX_l, pY_l_top,
-                    s_r, pX_r, pY_r_top,
+                    has_p, pX_l, pY_l_top,
+                    has_p, pX_r, pY_r_top,
                 )
 
                 latency_arrival = (frame_l.time_of_arrival - frame_l.time_of_capture) * 1000

@@ -1,1 +1,1 @@
-{"exposure": 166, "iso": 166, "blob_min_threshold": 150, "blob_max_threshold": 255, "blob_threshold_step": 50, "blob_min_area": 5, "blob_max_area": 1000, "blob_min_circularity": 0.77, "blob_min_convexity": 0.34, "blob_min_inertia": 0.54}
+{"exposure": 286, "iso": 209, "resolution": [1280, 720], "fps": 75, "stereo_conf_threshold": 0.5, "blob_min_threshold": 150, "blob_max_threshold": 255, "blob_threshold_step": 50, "blob_min_area": 5, "blob_max_area": 300, "blob_min_circularity": 0.68, "blob_min_convexity": 0.11, "blob_min_inertia": 0.36}

@@ -14,9 +14,9 @@ import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 
 CONFIG_FILE = "config.json"
-CAMERA_RESOLUTION = (1280, 720)
-CAMERA_FPS = 75
-STEREO_MATCH_CONF_THRESHOLD = .5
+DEFAULT_RESOLUTION = (1280, 720)
+DEFAULT_FPS = 75
+DEFAULT_STEREO_CONF_THRESHOLD = 0.5
 
 
 def load_config():
@@ -37,7 +37,10 @@ def load_config():
         "blob_max_area": 1000,
         "blob_min_circularity": 0.7,
         "blob_min_convexity": 0.9,
-        "blob_min_inertia": 0.6
+        "blob_min_inertia": 0.6,
+        "resolution": DEFAULT_RESOLUTION,
+        "fps": DEFAULT_FPS,
+        "stereo_conf_threshold": DEFAULT_STEREO_CONF_THRESHOLD
     }
 
 
@@ -292,7 +295,7 @@ def logistic_interpolation(
     return max(0.0, min(1.0, scaled_val))
 
 
-def match_candidates(candidates_l, candidates_r, stereo_cam: StereoCamera):
+def match_candidates(candidates_l, candidates_r, stereo_cam: StereoCamera, conf_threshold: float):
     best_match = None
     highest_confidence = 0
 
@@ -325,7 +328,7 @@ def match_candidates(candidates_l, candidates_r, stereo_cam: StereoCamera):
                                logistic_interpolation(size_ratio, ideal=1, cutoff=0),
                                logistic_interpolation(size, ideal=20, cutoff=5)], weights=weights)
 
-            if conf > highest_confidence and conf > STEREO_MATCH_CONF_THRESHOLD:
+            if conf > highest_confidence and conf > conf_threshold:
                 highest_confidence = conf
                 best_match = {
                     'left_raw': (x_l_raw, y_l_raw, s_l),
@@ -353,6 +356,9 @@ class Worker(QtCore.QThread):
         self.running = True
         self.exposure = int(config.get('exposure', 200))
         self.iso = int(config.get('iso', 100))
+        self.resolution = tuple(config.get('resolution', DEFAULT_RESOLUTION))
+        self.fps = int(config.get('fps', DEFAULT_FPS))
+        self.stereo_conf_threshold = float(config.get('stereo_conf_threshold', DEFAULT_STEREO_CONF_THRESHOLD))
         self.blob_params = {
             "blob_min_threshold": config.get("blob_min_threshold", 80),
             "blob_max_threshold": config.get("blob_max_threshold", 255),
@@ -367,7 +373,7 @@ class Worker(QtCore.QThread):
         self.blob_settings_changed = True
 
     def run(self):
-        with StereoCamera(CAMERA_RESOLUTION, CAMERA_FPS) as stereo_cam:
+        with StereoCamera(self.resolution, self.fps) as stereo_cam:
             blob_detector = BlobDetector(self.blob_params)
 
             IP = "127.0.0.1"
@@ -403,7 +409,7 @@ class Worker(QtCore.QThread):
                         'rect': stereo_cam.cam_r.rectify_point(x, y)
                     })
 
-                match = match_candidates(candidates_l, candidates_r, stereo_cam)
+                match = match_candidates(candidates_l, candidates_r, stereo_cam, self.stereo_conf_threshold)
                 found_correspondence = match is not None
 
                 if found_correspondence:
@@ -459,10 +465,36 @@ class MainWindow(QtWidgets.QMainWindow):
         # Camera Settings
         controls_layout.addWidget(QtWidgets.QLabel("<b>Camera Settings</b>"))
 
+        # Resolution
+        controls_layout.addWidget(QtWidgets.QLabel("Resolution:"))
+        self.res_combo = QtWidgets.QComboBox()
+        self.res_options = [(1280, 800), (1280, 720), (640, 400)]
+        for w, h in self.res_options:
+            self.res_combo.addItem(f"{w}x{h}")
+        current_res = tuple(self.config.get('resolution', DEFAULT_RESOLUTION))
+        if current_res in self.res_options:
+            self.res_combo.setCurrentIndex(self.res_options.index(current_res))
+        controls_layout.addWidget(self.res_combo)
+
+        # Framerate
+        controls_layout.addWidget(QtWidgets.QLabel("Framerate (FPS):"))
+        self.fps_spin = QtWidgets.QSpinBox()
+        self.fps_spin.setRange(30, 100)
+        self.fps_spin.setValue(self.config.get('fps', DEFAULT_FPS))
+        controls_layout.addWidget(self.fps_spin)
+
+        # Restart warning
+        restart_warning = QtWidgets.QLabel("Resolution and FPS changes require restart")
+        restart_warning.setWordWrap(True)
+        restart_warning.setStyleSheet("color: orange; font-style: italic;")
+        controls_layout.addWidget(restart_warning)
+
+        controls_layout.addSpacing(10)
+
         # Exposure
         controls_layout.addWidget(QtWidgets.QLabel("Exposure (\u03bcs):"))
         self.exp_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.exp_slider.setRange(1, 33000)
+        self.exp_slider.setRange(1, 3000)
         self.exp_slider.setValue(self.config['exposure'])
         self.exp_spin = QtWidgets.QSpinBox()
         self.exp_spin.setRange(1, 33000)
@@ -564,6 +596,22 @@ class MainWindow(QtWidgets.QMainWindow):
         blob_inert_h.addWidget(self.blob_inert_spin)
         controls_layout.addLayout(blob_inert_h)
 
+        # Stereo Match Confidence Threshold
+        controls_layout.addSpacing(20)
+        controls_layout.addWidget(QtWidgets.QLabel("<b>Stereo Matching</b>"))
+        controls_layout.addWidget(QtWidgets.QLabel("Confidence Threshold:"))
+        self.stereo_conf_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.stereo_conf_slider.setRange(0, 100)
+        self.stereo_conf_slider.setValue(int(self.config.get('stereo_conf_threshold', DEFAULT_STEREO_CONF_THRESHOLD) * 100))
+        self.stereo_conf_spin = QtWidgets.QDoubleSpinBox()
+        self.stereo_conf_spin.setRange(0.0, 1.0)
+        self.stereo_conf_spin.setSingleStep(0.05)
+        self.stereo_conf_spin.setValue(self.config.get('stereo_conf_threshold', DEFAULT_STEREO_CONF_THRESHOLD))
+        stereo_conf_h = QtWidgets.QHBoxLayout()
+        stereo_conf_h.addWidget(self.stereo_conf_slider)
+        stereo_conf_h.addWidget(self.stereo_conf_spin)
+        controls_layout.addLayout(stereo_conf_h)
+
         # Info
         controls_layout.addStretch()
         controls_layout.addWidget(QtWidgets.QLabel("<b>Tracking Info</b>"))
@@ -593,10 +641,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # Top Visuals: Image Preview and 3D
         visuals_layout.addLayout(top_visuals, stretch=1)
 
-        # Image Previews
+        # Image Previews (Vertical)
+        camera_layout = QtWidgets.QVBoxLayout()
+        top_visuals.addLayout(camera_layout, stretch=5)
+
         self.image_view_l = pg.GraphicsLayoutWidget()
         self.image_view_l.setBackground('gray')
-        self.image_view_l.setMinimumSize(300, 400)
+        self.image_view_l.setMinimumSize(300, 200)
         self.image_view_l.addLabel("<span style='color: #00FF00; font-weight: bold;'>Left Camera</span>", row=0, col=0)
         self.vb_l = self.image_view_l.addViewBox(row=1, col=0)
         self.vb_l.setAspectLocked(True)
@@ -611,7 +662,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.image_view_r = pg.GraphicsLayoutWidget()
         self.image_view_r.setBackground('gray')
-        self.image_view_r.setMinimumSize(300, 400)
+        self.image_view_r.setMinimumSize(300, 200)
         self.image_view_r.addLabel("<span style='color: #00FF00; font-weight: bold;'>Right Camera</span>", row=0, col=0)
         self.vb_r = self.image_view_r.addViewBox(row=1, col=0)
         self.vb_r.setAspectLocked(True)
@@ -631,7 +682,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # left and right previews have the same shape/aspect ratio right from
         # startup (before any real frame has been received from the worker),
         # and lock their views together so they always stay in sync.
-        blank_w, blank_h = CAMERA_RESOLUTION
+        blank_w, blank_h = self.config.get('resolution', DEFAULT_RESOLUTION)
         blank_frame = np.zeros((blank_w, blank_h), dtype=np.uint8)
         # Disable pyqtgraph's automatic level (brightness/contrast) scaling so the
         # preview reflects the camera's actual exposure instead of being
@@ -642,12 +693,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vb_r.setXLink(self.vb_l)
         self.vb_r.setYLink(self.vb_l)
 
-        top_visuals.addWidget(self.image_view_l, stretch=5)
-        top_visuals.addWidget(self.image_view_r, stretch=5)
+        camera_layout.addWidget(self.image_view_l)
+        camera_layout.addWidget(self.image_view_r)
 
         # 3D View
         self.gl_view = gl.GLViewWidget()
         self.gl_view.setMinimumSize(400, 300)
+        self.gl_view.setCameraPosition(distance=200)
         grid = gl.GLGridItem(size=QtGui.QVector3D(100, 100, 1))
         grid.setSpacing(10, 10, 10, )
         self.gl_view.addItem(grid)
@@ -685,6 +737,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.blob_conv_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_convexity", v))
         self.blob_inert_slider.valueChanged.connect(lambda v: self.blob_inert_spin.setValue(v / 100.0))
         self.blob_inert_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_inertia", v))
+        self.stereo_conf_slider.valueChanged.connect(lambda v: self.stereo_conf_spin.setValue(v / 100.0))
+        self.stereo_conf_spin.valueChanged.connect(self.update_stereo_conf)
 
         # Worker thread
         self.worker = Worker(self.config)
@@ -724,6 +778,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.blob_inert_slider.setValue(int(val * 100))
             self.blob_inert_slider.blockSignals(False)
 
+    def update_stereo_conf(self, val):
+        self.worker.stereo_conf_threshold = val
+        self.stereo_conf_slider.blockSignals(True)
+        self.stereo_conf_slider.setValue(int(val * 100))
+        self.stereo_conf_slider.blockSignals(False)
+
     @QtCore.Slot(np.ndarray, np.ndarray)
     def on_frame(self, frame_l: np.ndarray, frame_r: np.ndarray):
         for frame, img_item in [(frame_l, self.img_item_l), (frame_r, self.img_item_r)]:
@@ -735,7 +795,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_centroid(self, found_correspondence: bool, x_l, y_l, x_r, y_r):
         # Update Left
         if found_correspondence:
-            frame_h = CAMERA_RESOLUTION[1]
+            frame_h = self.worker.resolution[1]
             # OpenCV is Y down, UI is Y up
             y_l = frame_h - y_l
             y_r = frame_h - y_r
@@ -792,6 +852,9 @@ class MainWindow(QtWidgets.QMainWindow):
         config_to_save = {
             'exposure': self.worker.exposure,
             'iso': self.worker.iso,
+            'resolution': self.res_options[self.res_combo.currentIndex()],
+            'fps': self.fps_spin.value(),
+            'stereo_conf_threshold': self.stereo_conf_spin.value()
         }
         config_to_save.update(self.worker.blob_params)
         save_config(config_to_save)

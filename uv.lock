@@ -13,29 +13,17 @@ wheels = [
 
 [[package]]
 name = "depthai"
-version = "2.32.0.0"
+version = "3.8.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/cb/25/bb870fe9246815c32a040e15c82bda44d3fbdad0d87057e6af981792539a/depthai-2.32.0.0.tar.gz", hash = "sha256:e4c7743e4416b720add5093a80e3e899adcc69040ae00ea25e0bc17e094f8300", size = 457643, upload-time = "2026-01-27T11:28:02.804Z" }
+dependencies = [
+    { name = "numpy" },
+]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/dc/e4/c9790cfc0dec543ad139c7888f72a06307df695b1200ccdd9fed0bfb54a2/depthai-2.32.0.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:ad620828ba9d44675654898e2ba0284d485840fa8c04ad1e3e1aa2eb57bf23ff", size = 13164226, upload-time = "2026-01-27T11:26:50.78Z" },
-    { url = "https://files.pythonhosted.org/packages/6a/ab/73a17bfd2ed5686350ad38012edc22e16d817ecf8bd1dd6aff200777dfc5/depthai-2.32.0.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:b3192ffff904482254def4cd2b9aac0c4d082a0787303bdc980768da4368331c", size = 14089816, upload-time = "2026-01-27T11:26:53.871Z" },
-    { url = "https://files.pythonhosted.org/packages/64/89/aa90368d743451e9826a97619c427d9653bf61659f13a34a11964bc3a5e5/depthai-2.32.0.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:075bff62e9669203d5a090e223a005dd528e95440928dc38984cf3b75b36a927", size = 14648987, upload-time = "2026-01-27T11:26:56.698Z" },
-    { url = "https://files.pythonhosted.org/packages/ec/d8/5f32d7f0639075d1f599de8c2afbd45daec69e7ef1f66301ef50d510f511/depthai-2.32.0.0-cp312-cp312-win32.whl", hash = "sha256:9a99892b43d0841dce90ea0d312f4821a9486ff993e6773fb4fc2a174e4a42b2", size = 11085867, upload-time = "2026-01-27T11:26:59.836Z" },
-    { url = "https://files.pythonhosted.org/packages/c9/41/2ce60c5ed136c2faf02623710a07aadb92542d9122cc5d052b7e425f955e/depthai-2.32.0.0-cp312-cp312-win_amd64.whl", hash = "sha256:68f3ae15941a0828969de6130fa1479f95e377565b44e429bc7335b36462ffdf", size = 11468769, upload-time = "2026-01-27T11:27:02.427Z" },
-    { url = "https://files.pythonhosted.org/packages/c8/1d/de284f9ed141e2d741f11c45fc4dbee777a342e5e32dfcbbcca826c27ce3/depthai-2.32.0.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:18a4b9916b4d57f05c6b54f0ad461d23215b04ccefd15a4f67d26f01619d97d3", size = 13165133, upload-time = "2026-01-27T11:27:05.151Z" },
-    { url = "https://files.pythonhosted.org/packages/7d/45/3ff68807991dd1c18077d8c04e3c99137e7556be8d23c3688e52802e0ca1/depthai-2.32.0.0-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:13b1fc97cbbdd89557a99461287618df388a27d521b7cfb8d0b81636b8b3c437", size = 14089595, upload-time = "2026-01-27T11:27:08.099Z" },
-    { url = "https://files.pythonhosted.org/packages/f1/78/f7550e2682e7abaefd8878afbe7073c337901deba32fcad7dda8a9d8cd29/depthai-2.32.0.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:db48a16f60cdb15fb01bce6420988286061a9b10c2bfcaf41c0e0dd403653bfe", size = 14648920, upload-time = "2026-01-27T11:27:10.892Z" },
-    { url = "https://files.pythonhosted.org/packages/0e/9b/4cd42b2e7bbd66f5679c5d61a06bfa9f9807496b6bcc79ddd95579cfba37/depthai-2.32.0.0-cp313-cp313-win32.whl", hash = "sha256:dc02c74009aa6892644183d4b3089b27cfa7ab9755e266c789f6892adfcfa060", size = 11085494, upload-time = "2026-01-27T11:27:13.513Z" },
-    { url = "https://files.pythonhosted.org/packages/3b/60/2adcc14730f83b05d145e0f51e4747b5c2baf9ed6ff5a500aa8e41ec6f44/depthai-2.32.0.0-cp313-cp313-win_amd64.whl", hash = "sha256:bf4b93300958d225073130c130a260d6352eb7a6dd77d155ec29514ce1a8e87c", size = 11468620, upload-time = "2026-01-27T11:27:16.144Z" },
-    { url = "https://files.pythonhosted.org/packages/3c/b0/b7843b3d7eb7ebe9e42b31e86f9272c4622d6cb742c75a039c26a3f6bef8/depthai-2.32.0.0-cp313-cp313t-manylinux_2_28_aarch64.whl", hash = "sha256:a8fc1346e48f9371fbd9d7990bc13e0a58353ae486dde4a0956637bc58ceb54b", size = 14107562, upload-time = "2026-01-27T11:27:18.866Z" },
-    { url = "https://files.pythonhosted.org/packages/c0/a9/4c7a78c32c850618f6f7dfb80ea222f2e6c64581318442c036a8c03a22a1/depthai-2.32.0.0-cp313-cp313t-manylinux_2_28_x86_64.whl", hash = "sha256:a23e50a3974f72c3f5aedad9487d8603e44cbf0b2d000fa67e9d8a8e5d1fa4d9", size = 14689594, upload-time = "2026-01-27T11:27:21.679Z" },
-    { url = "https://files.pythonhosted.org/packages/f7/7d/b860ac019989f389cb6177f467a692c7b91358006c20cfbef8b31a648c8f/depthai-2.32.0.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:d30ef956e985f9129eaab0ebedfe8c4ac7708d019bd171012c56994217d8137c", size = 13171764, upload-time = "2026-01-27T11:27:24.729Z" },
-    { url = "https://files.pythonhosted.org/packages/f6/59/0e400912174d83160dfefe7f6cfa2733bc8e3dedfa598f9da362b4079780/depthai-2.32.0.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:d797cd0d544ecc10d270c4f3cf0123aa49de5f11e6dc07bf6f804af8aef142c6", size = 14099425, upload-time = "2026-01-27T11:27:27.697Z" },
-    { url = "https://files.pythonhosted.org/packages/68/4f/784e420345f9f1827fd4b3ca3ab422a574f59dc49b8d8eb1c162a916690b/depthai-2.32.0.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:ad7533cf6aa4058b719983c877d757f7cceed7840f9ed43ade3d208c98503fef", size = 14654547, upload-time = "2026-01-27T11:27:30.452Z" },
-    { url = "https://files.pythonhosted.org/packages/d8/ce/123f7edd315c6daad3e7db0774909ba7ed5335303fda92ec2f5d4e1b3ebd/depthai-2.32.0.0-cp314-cp314-win32.whl", hash = "sha256:fab3d34d0225be261f74624f6d568ec68b379cb9300196e6bbab3878407f96c0", size = 11131554, upload-time = "2026-01-27T11:27:33.153Z" },
-    { url = "https://files.pythonhosted.org/packages/4c/e6/cea5adfb65f5a21618e1691cbacd9c6f7c327b7751af485e91c4554f9240/depthai-2.32.0.0-cp314-cp314-win_amd64.whl", hash = "sha256:477695b7b680f6e387376cdbc7d6c461e5ab821bd22d845ea89fc21a5cc43ff2", size = 11551320, upload-time = "2026-01-27T11:27:35.832Z" },
-    { url = "https://files.pythonhosted.org/packages/75/8d/c8956c8bb5071900e0a4dad2056bd260cd29e04061772d66f3d342e6e049/depthai-2.32.0.0-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:8779c2c98ce29a399d8bfb6dc17cce250453443229d22a774b0beeacf84051ba", size = 14107532, upload-time = "2026-01-27T11:27:38.973Z" },
-    { url = "https://files.pythonhosted.org/packages/cc/03/840e74e83e45cbbd06973bb3512f8c1bc3688dcfa126ced7fe6e727fcf69/depthai-2.32.0.0-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:8870da7f4ce0cdebb4bf645009146293f09c1ce34e9c6e7fc4e3cae5ae69bfe2", size = 14689587, upload-time = "2026-01-27T11:27:41.698Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/9c/5c1bf6e08d80c5ecca1f67a4bd1bfa0fe1b63055d79c762b266ed38f5f03/depthai-3.8.0-cp39.cp310.cp311.cp312.cp313.cp314-cp39.cp310.cp311.cp312.cp313.cp314-macosx_11_0_arm64.whl", hash = "sha256:a26a2274eef34edc2a04c50360f43ad55f2ee86f3752c008898b86df1262efa2", size = 62711191, upload-time = "2026-07-10T22:47:55.533Z" },
+    { url = "https://files.pythonhosted.org/packages/14/af/ace11468e674bc9519fb048db4a15872fea56570a584088bc4f40755136c/depthai-3.8.0-cp39.cp310.cp311.cp312.cp313.cp314-cp39.cp310.cp311.cp312.cp313.cp314-macosx_11_0_x86_64.whl", hash = "sha256:84e7c5ab8d6076f724531375d7d281e826f7ac015446bf30fafcf4026f9e136b", size = 66222240, upload-time = "2026-07-10T22:47:59.289Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/60/e26cda3f7f589575eb84d053a64028e516a60a632b728094daef43b52310/depthai-3.8.0-cp39.cp310.cp311.cp312.cp313.cp314-cp39.cp310.cp311.cp312.cp313.cp314-manylinux_2_28_aarch64.whl", hash = "sha256:68b722c0eefdfc2e7b148c7520b67bb9f839ce394cb6b5d8a5a20acb5050d0ee", size = 76927934, upload-time = "2026-07-10T22:48:02.839Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/5f/f3de4933b80ac6902152d621e56c5b4d7f1cde78f68713d4ff9e24d7de24/depthai-3.8.0-cp39.cp310.cp311.cp312.cp313.cp314-cp39.cp310.cp311.cp312.cp313.cp314-manylinux_2_28_x86_64.whl", hash = "sha256:6d7aef6f80222f71394334babbdd7404bcb214717237c9b4c8b968fc5ea0968d", size = 82090082, upload-time = "2026-07-10T22:48:06.916Z" },
+    { url = "https://files.pythonhosted.org/packages/a5/88/645a89bc5d2daa0146e71ecd700635e7ef0c0d6218d0b74cd58eeea73d49/depthai-3.8.0-cp39.cp310.cp311.cp312.cp313.cp314-cp39.cp310.cp311.cp312.cp313.cp314-win_amd64.whl", hash = "sha256:1151bc53cf3e8a4ade85068ebef335b222c6ad1ca5ad668929d2e63bf54ebd75", size = 66999701, upload-time = "2026-07-10T22:48:10.303Z" },
 ]
 
 [[package]]
@@ -53,7 +41,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "depthai", specifier = "==2.32.0.0" },
+    { name = "depthai", specifier = ">=3.8.0" },
     { name = "numpy", specifier = ">=2.5.1" },
     { name = "opencv-python", specifier = ">=5.0.0.93" },
     { name = "pyopengl", specifier = ">=3.1.10" },

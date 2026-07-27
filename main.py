@@ -230,21 +230,12 @@ class MonoCamera:
         self.prev_frame_arrival_time = -1.0
         self.name = name
 
-        cam = pipeline.create(dai.node.MonoCamera)
-        assert isinstance(cam, dai.node.MonoCamera)
-        cam.setBoardSocket(socket)
-        cam.setFps(fps)
-        cam.setResolution(resolution)
-
-        cam.out.link(sync.inputs[name])
+        cam = pipeline.create(dai.node.Camera).build(socket)
+        self.cam_out = cam.requestOutput(self.numeric_resolution, fps=fps)
+        self.cam_out.link(sync.inputs[name])
         sync.inputs[name].setBlocking(False)
-        sync.inputs[name].setQueueSize(1)
-
-        self.cam_ctrl = pipeline.create(dai.node.XLinkIn)
-        assert isinstance(self.cam_ctrl, dai.node.XLinkIn)
-        self.cam_ctrl_q_name = f"{name}_cam_control"
-        self.cam_ctrl.setStreamName(self.cam_ctrl_q_name)
-        self.cam_ctrl.out.link(cam.inputControl)
+        sync.inputs[name].setMaxSize(1)
+        self.cam_ctrl_q = cam.inputControl.createInputQueue()
 
         self.rect_map_x = None
         self.rect_map_y = None
@@ -266,10 +257,10 @@ class MonoCamera:
             rect_frame = cv_frame
         return Frame(rect_frame, frame_time_ms, capture_time, arrival_time)
 
-    def set_exposure(self, device: dai.Device, exp_time: int, sens_iso: int) -> None:
+    def set_exposure(self, exp_time: int, sens_iso: int) -> None:
         msg = dai.CameraControl()
         msg.setManualExposure(exp_time, sens_iso)
-        device.getInputQueue(self.cam_ctrl_q_name).send(msg)
+        self.cam_ctrl_q.send(msg)
 
 
 class StereoCamera:
@@ -287,14 +278,12 @@ class StereoCamera:
         assert isinstance(sync, dai.node.Sync)
         self.cam_l = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_B, "left", sync, self.resolution, self.fps)
         self.cam_r = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_C, "right", sync, self.resolution, self.fps)
-        x_out_sync = self.pipeline.create(dai.node.XLinkOut)
-        assert isinstance(x_out_sync, dai.node.XLinkOut)
-        self.x_out_stream_name = "x_out"
-        x_out_sync.setStreamName(self.x_out_stream_name)
-        sync.out.link(x_out_sync.input)
-        x_out_sync.input.setBlocking(False)
-        x_out_sync.input.setQueueSize(1)
-        self.device = dai.Device(self.pipeline)
+
+        self.x_out_q = sync.out.createOutputQueue()
+
+        self.pipeline.start()
+        # In v3, we can get calibration directly from the pipeline if it's started
+        # and has a device. Or we can use pipeline.getDevice().readCalibration()
         self.cam_params_l, self.cam_params_r = self.compute_stereo_rectification()
         self.cam_l.set_rectification_maps(self.cam_params_l.rectify_map_x, self.cam_params_l.rectify_map_y)
         self.cam_r.set_rectification_maps(self.cam_params_r.rectify_map_x, self.cam_params_r.rectify_map_y)
@@ -302,10 +291,10 @@ class StereoCamera:
 
     def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None,
                  exc_tb: TracebackType | None):
-        self.device.close()
+        self.pipeline.stop()
 
     def compute_stereo_rectification(self) -> typing.Tuple[CameraSocketParams, CameraSocketParams]:
-        calibration = self.device.readCalibration()
+        calibration = self.pipeline.getDefaultDevice().readCalibration()
 
         intrinsics_l = np.array(
             calibration.getCameraIntrinsics(
@@ -360,7 +349,7 @@ class StereoCamera:
                 CameraSocketParams(projection_r, rectify_map_r_x, rectify_map_r_y))
 
     def get_stereo_frames(self) -> typing.Tuple[Frame, Frame]:
-        message_group = self.device.getOutputQueue(self.x_out_stream_name).get()
+        message_group = self.x_out_q.get()
         arrival_time = dai.Clock.now().total_seconds()
         assert isinstance(message_group, dai.MessageGroup)
         raw_frame_l = message_group["left"]
@@ -385,8 +374,8 @@ class StereoCamera:
         return first
 
     def set_exposure(self, exp_time: int, sens_iso: int) -> None:
-        self.cam_l.set_exposure(self.device, exp_time, sens_iso)
-        self.cam_r.set_exposure(self.device, exp_time, sens_iso)
+        self.cam_l.set_exposure(exp_time, sens_iso)
+        self.cam_r.set_exposure(exp_time, sens_iso)
 
 
 class BlobDetector:

@@ -1,248 +1,17 @@
 import math
 import sys
-import json
 import socket
+import typing
+
 import numpy as np
 import cv2
-import depthai as dai
-import typing
-from pathlib import Path
-from dataclasses import dataclass
-from types import TracebackType
 from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 
-CONFIG_FILE = "config.json"
-DEFAULT_RESOLUTION = (1280, 720)
-DEFAULT_FPS = 75
-DEFAULT_STEREO_CONF_THRESHOLD = 0.5
-
-
-def load_config():
-    if Path(CONFIG_FILE).exists():
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {
-        "exposure": 200,
-        "iso": 100,
-        "threshold": 0.9,
-        "blob_min_threshold": 80,
-        "blob_max_threshold": 255,
-        "blob_threshold_step": 10,
-        "blob_min_area": 20,
-        "blob_max_area": 1000,
-        "blob_min_circularity": 0.7,
-        "blob_min_convexity": 0.9,
-        "blob_min_inertia": 0.6,
-        "resolution": DEFAULT_RESOLUTION,
-        "fps": DEFAULT_FPS,
-        "stereo_conf_threshold": DEFAULT_STEREO_CONF_THRESHOLD
-    }
-
-
-def save_config(config):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f)
-
-
-@dataclass(frozen=True)
-class CameraSocketParams:
-    projection: np.ndarray
-    intrinsics: np.ndarray
-    distortion: np.ndarray
-    rotation: np.ndarray
-
-
-@dataclass(frozen=True)
-class Frame:
-    frame: np.ndarray
-    frame_time: float
-    time_of_capture: float
-    time_of_arrival: float
-
-
-class MonoCamera:
-    def __init__(self, pipeline: dai.Pipeline, socket: dai.CameraBoardSocket, name: str, sync: dai.node.Sync,
-                 resolution: typing.Tuple[int, int], fps: int):
-        self.resolution = resolution
-        self.prev_frame_arrival_time = -1.0
-        self.name = name
-
-        cam = pipeline.create(dai.node.Camera).build(socket)
-        self.cam_out = cam.requestOutput(self.resolution, fps=fps)
-        self.cam_out.link(sync.inputs[name])
-        sync.inputs[name].setBlocking(False)
-        sync.inputs[name].setMaxSize(1)
-        self.cam_ctrl_q = cam.inputControl.createInputQueue()
-
-        self.params = None
-
-    def set_params(self, params: CameraSocketParams):
-        self.params = params
-
-    def rectify_point(self, x: float, y: float) -> typing.Tuple[float, float]:
-        if self.params is None:
-            return x, y
-        # cv2.undistortPoints expects a 1xNx2 or Nx1x2 array
-        pt = np.array([[[x, y]]], dtype=np.float32)
-        undistorted = cv2.undistortPoints(pt, self.params.intrinsics, self.params.distortion,
-                                          R=self.params.rotation, P=self.params.projection)
-        return undistorted[0][0][0], undistorted[0][0][1]
-
-    def process_frame(self, frame: dai.ImgFrame, arrival_time: float):
-        frame_time_ms = (arrival_time - self.prev_frame_arrival_time) * 1000
-        self.prev_frame_arrival_time = arrival_time
-        capture_time = frame.getTimestamp().total_seconds()
-        cv_frame = frame.getCvFrame()
-        return Frame(cv_frame, frame_time_ms, capture_time, arrival_time)
-
-    def set_exposure(self, exp_time: int, sens_iso: int) -> None:
-        msg = dai.CameraControl()
-        msg.setManualExposure(exp_time, sens_iso)
-        self.cam_ctrl_q.send(msg)
-
-
-class StereoCamera:
-    def __init__(
-            self, resolution: typing.Tuple[int, int], fps: int
-    ):
-        self.resolution = resolution
-        self.fps = fps
-
-    def __enter__(self) -> "StereoCamera":
-        self.pipeline = dai.Pipeline()
-        self.pipeline.setXLinkChunkSize(0)
-        sync = self.pipeline.create(dai.node.Sync)
-        assert isinstance(sync, dai.node.Sync)
-        self.cam_l = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_B, "left", sync, self.resolution, self.fps)
-        self.cam_r = MonoCamera(self.pipeline, dai.CameraBoardSocket.CAM_C, "right", sync, self.resolution, self.fps)
-
-        self.x_out_q = sync.out.createOutputQueue()
-
-        self.pipeline.start()
-        # In v3, we can get calibration directly from the pipeline if it's started
-        # and has a device. Or we can use pipeline.getDevice().readCalibration()
-        self.cam_params_l, self.cam_params_r = self.compute_stereo_rectification()
-        self.cam_l.set_params(self.cam_params_l)
-        self.cam_r.set_params(self.cam_params_r)
-        return self
-
-    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None,
-                 exc_tb: TracebackType | None):
-        self.pipeline.stop()
-
-    def compute_stereo_rectification(self) -> typing.Tuple[CameraSocketParams, CameraSocketParams]:
-        calibration = self.pipeline.getDefaultDevice().readCalibration()
-
-        intrinsics_l = np.array(
-            calibration.getCameraIntrinsics(
-                dai.CameraBoardSocket.CAM_B, self.resolution[0], self.resolution[1]
-            ),
-        )
-        intrinsics_r = np.array(
-            calibration.getCameraIntrinsics(
-                dai.CameraBoardSocket.CAM_C, self.resolution[0], self.resolution[1]
-            ),
-        )
-
-        distortion_l = np.array(
-            calibration.getDistortionCoefficients(dai.CameraBoardSocket.CAM_B),
-        )
-        distortion_r = np.array(
-            calibration.getDistortionCoefficients(dai.CameraBoardSocket.CAM_C),
-        )
-
-        l_to_r_transformation = np.array(
-            calibration.getCameraExtrinsics(
-                dai.CameraBoardSocket.CAM_B, dai.CameraBoardSocket.CAM_C
-            )
-        )
-        l_to_r_rotation = l_to_r_transformation[:3, :3]
-        l_to_r_translation = l_to_r_transformation[:3, 3:4]
-
-        rotation_l, rotation_r, projection_l, projection_r, _, _, _ = cv2.stereoRectify(
-            intrinsics_l, distortion_l.flatten(),
-            intrinsics_r, distortion_r.flatten(),
-            imageSize=self.resolution,
-            R=l_to_r_rotation,
-            T=l_to_r_translation,
-            flags=cv2.CALIB_ZERO_DISPARITY,
-            alpha=0
-        )
-
-        rectify_map_l_x, rectify_map_l_y = cv2.initUndistortRectifyMap(
-            intrinsics_l, distortion_l,
-            rotation_l, projection_l,
-            self.resolution,
-            cv2.CV_16SC2
-        )
-        return (CameraSocketParams(projection_l, intrinsics_l, distortion_l, rotation_l),
-                CameraSocketParams(projection_r, intrinsics_r, distortion_r, rotation_r))
-
-    def get_stereo_frames(self) -> typing.Tuple[Frame, Frame]:
-        message_group = self.x_out_q.get()
-        arrival_time = dai.Clock.now().total_seconds()
-        assert isinstance(message_group, dai.MessageGroup)
-        raw_frame_l = message_group["left"]
-        raw_frame_r = message_group["right"]
-        assert isinstance(raw_frame_l, dai.ImgFrame) and isinstance(raw_frame_r, dai.ImgFrame)
-        frame_l = self.cam_l.process_frame(raw_frame_l, arrival_time)
-        frame_r = self.cam_r.process_frame(raw_frame_r, arrival_time)
-        return frame_l, frame_r
-
-    def triangulate(
-            self,
-            point_l: typing.Tuple[float, float],
-            point_r: typing.Tuple[float, float],
-    ) -> np.ndarray:
-        # cv.triangulatePoints operates on 2xN arrays of points
-        points_l = np.array(point_l).reshape(2, 1)
-        points_r = np.array(point_r).reshape(2, 1)
-        points4d: np.ndarray = cv2.triangulatePoints(self.cam_params_l.projection, self.cam_params_r.projection,
-                                                     points_l, points_r)
-        first = points4d[:, 0]
-        first = first[:3] / first[3]  # homogenous -> cartesian
-        return first
-
-    def set_exposure(self, exp_time: int, sens_iso: int) -> None:
-        self.cam_l.set_exposure(exp_time, sens_iso)
-        self.cam_r.set_exposure(exp_time, sens_iso)
-
-
-class BlobDetector:
-    def __init__(self, config):
-        self.detector = None
-        self.update_params(config)
-
-    def update_params(self, config):
-        params = cv2.SimpleBlobDetector.Params()
-        params.minThreshold = config.get("blob_min_threshold", 80)
-        params.maxThreshold = config.get("blob_max_threshold", 255)
-        params.thresholdStep = config.get("blob_threshold_step", 10)
-        params.maxThreshold = max(params.maxThreshold, params.minThreshold)
-        params.filterByColor = True
-        params.blobColor = 255
-        params.filterByArea = True
-        params.minArea = config.get("blob_min_area", 20)
-        params.maxArea = config.get("blob_max_area", 1000)
-        params.maxArea = max(params.maxArea, params.minArea)
-        params.filterByCircularity = True
-        params.minCircularity = max(0.01, config.get("blob_min_circularity", 0.7))
-        params.filterByConvexity = True
-        params.minConvexity = max(0.01, config.get("blob_min_convexity", 0.9))
-        params.filterByInertia = True
-        params.minInertiaRatio = max(0.01, config.get("blob_min_inertia", 0.6))
-        self.detector = cv2.SimpleBlobDetector.create(params)
-
-    def detect_candidates(self, img: cv2.typing.MatLike) -> typing.List[typing.Tuple[float, float, float]]:
-        keypoints = self.detector.detect(img)
-        keypoints = sorted(keypoints, key=lambda kp: kp.size, reverse=True)[:10]
-        return [(kp.pt[0], kp.pt[1], kp.size) for kp in keypoints]
-
+from blob_detector import BlobDetector
+from camera import StereoCamera
+from config import Config
 
 def logistic_interpolation(
         val: float,
@@ -355,9 +124,9 @@ class Worker(QtCore.QThread):
         self.running = True
         self.exposure = int(config.get('exposure', 200))
         self.iso = int(config.get('iso', 100))
-        self.resolution = tuple(config.get('resolution', DEFAULT_RESOLUTION))
-        self.fps = int(config.get('fps', DEFAULT_FPS))
-        self.stereo_conf_threshold = float(config.get('stereo_conf_threshold', DEFAULT_STEREO_CONF_THRESHOLD))
+        self.resolution = tuple(config.get('resolution'))
+        self.fps = int(config.get('fps'))
+        self.stereo_conf_threshold = float(config.get('stereo_conf_threshold'))
         self.blob_params = {
             "blob_min_threshold": config.get("blob_min_threshold", 80),
             "blob_max_threshold": config.get("blob_max_threshold", 255),
@@ -373,7 +142,7 @@ class Worker(QtCore.QThread):
 
     def run(self):
         with StereoCamera(self.resolution, self.fps) as stereo_cam:
-            blob_detector = BlobDetector(self.blob_params)
+            blob_detector = BlobDetector(self.config)
 
             IP = "127.0.0.1"
             PORT = 4241
@@ -396,9 +165,9 @@ class Worker(QtCore.QThread):
                 raw_candidates_r = blob_detector.detect_candidates(frame_r.frame)
 
                 candidates_l = []
-                for x, y, s in raw_candidates_l:
+                for detection in raw_candidates_l:
                     candidates_l.append({
-                        'raw': (x, y, s),
+                        'raw': (detection.x, detection.y, s),
                         'rect': stereo_cam.cam_l.rectify_point(x, y)
                     })
                 candidates_r = []
@@ -449,7 +218,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("DepthAI Point Tracker")
         self.resize(1200, 900)
 
-        self.config = load_config()
+        self.config = Config()
 
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
@@ -470,7 +239,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.res_options = [(1280, 800), (1280, 720), (640, 400)]
         for w, h in self.res_options:
             self.res_combo.addItem(f"{w}x{h}")
-        current_res = tuple(self.config.get('resolution', DEFAULT_RESOLUTION))
+        current_res = tuple(self.config.get('resolution'))
         if current_res in self.res_options:
             self.res_combo.setCurrentIndex(self.res_options.index(current_res))
         controls_layout.addWidget(self.res_combo)

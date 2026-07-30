@@ -10,8 +10,11 @@ import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 
 from blob_detector import BlobDetector
-from camera import StereoCamera
+from camera import StereoCamera, CameraConfigKeys
 from config import Config
+from tracker import Tracker
+from udp_sender import UdpSender
+
 
 def logistic_interpolation(
         val: float,
@@ -108,13 +111,9 @@ def match_candidates(candidates_l, candidates_r, stereo_cam: StereoCamera, conf_
     return best_match
 
 
-def map_open_cv_to_output_coords(pos: np.ndarray) -> np.ndarray:
-    return np.array([pos[0], -pos[1], pos[2]])
-
-
 class Worker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray, np.ndarray)
-    centroid_ready = QtCore.Signal(bool, float, float, float, float)
+    centroid_ready = QtCore.Signal(bool, typing.Tuple[float, float], typing.Tuple[float, float], typing.Tuple[int, int])
     position_ready = QtCore.Signal(np.ndarray)
     stats_ready = QtCore.Signal(float, float, float, float, float)
 
@@ -122,90 +121,21 @@ class Worker(QtCore.QThread):
         super().__init__()
         self.config = config
         self.running = True
-        self.exposure = int(config.get('exposure', 200))
-        self.iso = int(config.get('iso', 100))
-        self.resolution = tuple(config.get('resolution'))
-        self.fps = int(config.get('fps'))
-        self.stereo_conf_threshold = float(config.get('stereo_conf_threshold'))
-        self.blob_params = {
-            "blob_min_threshold": config.get("blob_min_threshold", 80),
-            "blob_max_threshold": config.get("blob_max_threshold", 255),
-            "blob_threshold_step": config.get("blob_threshold_step", 10),
-            "blob_min_area": config.get("blob_min_area", 20),
-            "blob_max_area": config.get("blob_max_area", 1000),
-            "blob_min_circularity": config.get("blob_min_circularity", 0.7),
-            "blob_min_convexity": config.get("blob_min_convexity", 0.9),
-            "blob_min_inertia": config.get("blob_min_inertia", 0.6)
-        }
-        self.settings_changed = True
-        self.blob_settings_changed = True
 
     def run(self):
-        with StereoCamera(self.resolution, self.fps) as stereo_cam:
-            blob_detector = BlobDetector(self.config)
-
-            IP = "127.0.0.1"
-            PORT = 4241
-            sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-            stereo_cam.set_exposure(self.exposure, self.iso)
-
+        with Tracker(self.config) as tracker:
             while self.running:
-                if self.settings_changed:
-                    stereo_cam.set_exposure(self.exposure, self.iso)
-                    self.settings_changed = False
+                detection = tracker.detect()
 
-                if self.blob_settings_changed:
-                    blob_detector.update_params(self.blob_params)
-                    self.blob_settings_changed = False
-
-                frame_l, frame_r = stereo_cam.get_stereo_frames()
-
-                raw_candidates_l = blob_detector.detect_candidates(frame_l.frame)
-                raw_candidates_r = blob_detector.detect_candidates(frame_r.frame)
-
-                candidates_l = []
-                for detection in raw_candidates_l:
-                    candidates_l.append({
-                        'raw': (detection.x, detection.y, s),
-                        'rect': stereo_cam.cam_l.rectify_point(x, y)
-                    })
-                candidates_r = []
-                for x, y, s in raw_candidates_r:
-                    candidates_r.append({
-                        'raw': (x, y, s),
-                        'rect': stereo_cam.cam_r.rectify_point(x, y)
-                    })
-
-                match = match_candidates(candidates_l, candidates_r, stereo_cam, self.stereo_conf_threshold)
-                found_correspondence = match is not None
-
-                if found_correspondence:
-                    cX_l, cY_l, _ = match['left_raw']
-                    cX_r, cY_r, _ = match['right_raw']
-                    tracked_pos = match['pos_3d']
-                else:
-                    cX_l = cY_l = cX_r = cY_r = -1.0
-
-                self.frame_ready.emit(frame_l.frame.copy(), frame_r.frame.copy())
-                self.centroid_ready.emit(found_correspondence, cX_l, cY_l, cX_r, cY_r)
-
-                latency_arrival = (frame_l.time_of_arrival - frame_l.time_of_capture) * 1000
-                ts_diff_us = abs(frame_l.time_of_capture - frame_r.time_of_capture) * 1_000_000
-                latency_calc = -1.0
-                latency_total = -1.0
-
-                if found_correspondence:
-                    t_3d_finished = dai.Clock.now().total_seconds()
-                    latency_calc = (t_3d_finished - frame_l.time_of_arrival) * 1000
-                    latency_total = (t_3d_finished - frame_l.time_of_capture) * 1000
-                    self.position_ready.emit(tracked_pos)
-
-                    tracked_pos_with_empty_rotation = np.zeros(6)
-                    tracked_pos_with_empty_rotation[:3] = map_open_cv_to_output_coords(tracked_pos)
-                    sock.sendto(tracked_pos_with_empty_rotation.tobytes(), (IP, PORT))
-
-                self.stats_ready.emit(frame_l.frame_time, latency_arrival, latency_calc, latency_total, ts_diff_us)
+                self.frame_ready.emit(detection.frame.left_frame.copy(), detection.frame.right_frame.copy())
+                self.stats_ready.emit(detection.frame.frame_time, detection.frame.left_time_of_capture,
+                                      detection.frame.right_time_of_capture, detection.frame.time_of_arrival,
+                                      detection.time_of_processing_finished)
+                found = detection.confidence_01 >= self.config.get_default("detection_confidence_threshold", 0.5)
+                resolution = detection.frame.left_frame.shape[1], detection.frame.left_frame.shape[0]
+                self.centroid_ready.emit(found, detection.pos_2d_raw_l, detection.pos_2d_raw_r, resolution)
+                if found:
+                    self.position_ready.emit(detection.pos_3d)
 
     def stop(self):
         self.running = False
@@ -234,6 +164,7 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(QtWidgets.QLabel("<b>Camera Settings</b>"))
 
         # Resolution
+        self.initial_resolution = self.config.get('resolution')
         controls_layout.addWidget(QtWidgets.QLabel("Resolution:"))
         self.res_combo = QtWidgets.QComboBox()
         self.res_options = [(1280, 800), (1280, 720), (640, 400)]
@@ -370,7 +301,8 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(QtWidgets.QLabel("Confidence Threshold:"))
         self.stereo_conf_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.stereo_conf_slider.setRange(0, 100)
-        self.stereo_conf_slider.setValue(int(self.config.get('stereo_conf_threshold', DEFAULT_STEREO_CONF_THRESHOLD) * 100))
+        self.stereo_conf_slider.setValue(
+            int(self.config.get('stereo_conf_threshold', DEFAULT_STEREO_CONF_THRESHOLD) * 100))
         self.stereo_conf_spin = QtWidgets.QDoubleSpinBox()
         self.stereo_conf_spin.setRange(0.0, 1.0)
         self.stereo_conf_spin.setSingleStep(0.05)
@@ -518,7 +450,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_exposure(self, val):
         self.worker.exposure = val
-        self.worker.settings_changed = True
+        self.config.set(CameraConfigKeys.exposure, val)
         self.exp_slider.blockSignals(True)
         self.exp_slider.setValue(val)
         self.exp_slider.blockSignals(False)
@@ -559,19 +491,20 @@ class MainWindow(QtWidgets.QMainWindow):
             mirrored = cv2.flip(rotated_frame, 1)
             img_item.setImage(mirrored.T, autoLevels=False, levels=(0, 255))
 
-    @QtCore.Slot(bool, float, float, float, float)
-    def on_centroid(self, found_correspondence: bool, x_l, y_l, x_r, y_r):
+    @QtCore.Slot(bool, typing.Tuple[float, float], typing.Tuple[float, float], typing.Tuple[int, int])
+    def on_centroid(self, is_detected: bool, pos_2d_raw_l: typing.Tuple[float, float],
+                    pos_2d_raw_r: typing.Tuple[float, float], resolution: typing.Tuple[int, int]):
         # Update Left
-        if found_correspondence:
+        if is_detected:
             frame_h = self.worker.resolution[1]
             # OpenCV is Y down, UI is Y up
-            y_l = frame_h - y_l
-            y_r = frame_h - y_r
-            self.crosshair_v_l.setPos(x_l)
+            y_l = frame_h - pos_2d_raw_l[1]
+            y_r = frame_h - pos_2d_raw_r[1]
+            self.crosshair_v_l.setPos(pos_2d_raw_l[0])
             self.crosshair_h_l.setPos(y_l)
             self.crosshair_v_l.show()
             self.crosshair_h_l.show()
-            self.crosshair_v_r.setPos(x_r)
+            self.crosshair_v_r.setPos(pos_2d_raw_r[0])
             self.crosshair_h_r.setPos(y_r)
             self.crosshair_v_r.show()
             self.crosshair_h_r.show()
@@ -581,13 +514,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.crosshair_v_r.hide()
             self.crosshair_h_r.hide()
 
-        text_l = f"L: {x_l:.1f}, {y_l:.1f}" if found_correspondence else "L: N/A"
-        text_r = f"R: {x_r:.1f}, {y_r:.1f}" if found_correspondence else "R: N/A"
+        text_l = f"L: {x_l:.1f}, {y_l:.1f}" if is_detected else "L: N/A"
+        text_r = f"R: {x_r:.1f}, {y_r:.1f}" if is_detected else "R: N/A"
         self.centroid_label.setText(f"Centroid: {text_l} | {text_r}")
 
     @QtCore.Slot(np.ndarray)
     def on_position(self, pos):
-        pos = map_open_cv_to_output_coords(pos)
         self.pos_label.setText(f"XYZ: {pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}")
         # Flip z and y to transform to the space of the UI view
         self.pos_marker.setData(pos=np.array([[pos[0], pos[2], pos[1]]]))
@@ -603,29 +535,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.curve_z.setData(self.data_z)
 
     @QtCore.Slot(float, float, float, float, float)
-    def on_stats(self, frame_time, l_arrival, l_processing, l_total, ts_diff):
+    def on_stats(self, frame_time: float, time_of_capture_l: float, time_of_capture_r: float, time_of_arrival: float,
+                 time_of_3d_detection: float):
         fps = float(1000.0 / frame_time)
         self.frame_time_label.setText(f"Frame time: {frame_time:.1f}ms ({fps:.1f} FPS)")
+        l_arrival = (time_of_capture_l - time_of_arrival) * 1e3
         self.capture_latency_label.setText(f"Capture latency: {l_arrival:.1f}ms")
-        if l_processing >= 0:
+        if time_of_3d_detection >= 0:
+            l_processing = (time_of_3d_detection - time_of_arrival) * 1e3
             self.processing_latency_label.setText(f"Processing latency: {l_processing:.1f}ms")
+            l_total = l_arrival + l_processing
             self.total_latency_label.setText(f"Total latency: {l_total:.1f}ms")
         else:
             self.processing_latency_label.setText("Processing latency: N/A")
             self.total_latency_label.setText("Total latency: N/A")
-        self.lr_diff_label.setText(f"L-R frame diff: {ts_diff:.1f}µs")
+
+        diff_ts = (time_of_capture_r - time_of_capture_l) * 1e6
+        self.lr_diff_label.setText(f"L-R frame diff: {diff_ts:.1f}µs")
 
     def closeEvent(self, event):
         self.worker.stop()
-        config_to_save = {
-            'exposure': self.worker.exposure,
-            'iso': self.worker.iso,
-            'resolution': self.res_options[self.res_combo.currentIndex()],
-            'fps': self.fps_spin.value(),
-            'stereo_conf_threshold': self.stereo_conf_spin.value()
-        }
-        config_to_save.update(self.worker.blob_params)
-        save_config(config_to_save)
+        self.config.save_file()
         event.accept()
 
 

@@ -1,5 +1,6 @@
 import typing
 from dataclasses import dataclass
+from enum import Enum
 
 import cv2
 
@@ -7,11 +8,25 @@ from config import Config, ConfigValue
 
 
 @dataclass(frozen=True)
-class Detection:
+class Detection2D:
     x: float
     y: float
     size: float
 
+class BlobDetectorConfigKeys(str, Enum):
+    min_threshold = "blob_min_threshold"
+    max_threshold = "blob_max_threshold"
+    threshold_step = "blob_threshold_step"
+    min_area = "blob_min_area"
+    max_area = "blob_max_area"
+    min_circularity = "blob_min_circularity"
+    min_convexity = "blob_min_convexity"
+    min_inertia = "blob_min_inertia"
+
+DEFAULT_CONFIG = {
+    BlobDetectorConfigKeys.min_threshold: 80,
+    BlobDetectorConfigKeys.max_threshold: 255,
+}
 
 class BlobDetector:
     def __init__(self, config: Config):
@@ -40,10 +55,10 @@ class BlobDetector:
         params.minInertiaRatio = max(0.01, self.config.get_default("blob_min_inertia", 0.6))
         self.detector = cv2.SimpleBlobDetector.create(params)
 
-    def detect_candidates(self, img: cv2.typing.MatLike) -> typing.List[Detection]:
+    def detect_candidates(self, img: cv2.typing.MatLike) -> typing.List[Detection2D]:
         keypoints = self.detector.detect(img)
         keypoints = sorted(keypoints, key=lambda kp: kp.size, reverse=True)[:10]
-        return [Detection(kp.pt[0], kp.pt[1], kp.size) for kp in keypoints]
+        return [Detection2D(kp.pt[0], kp.pt[1], kp.size) for kp in keypoints]
 
     def on_config_changed(self, name: str, _: ConfigValue):
         if name.startswith("blob"):

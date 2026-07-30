@@ -2,6 +2,8 @@ import json
 import threading
 import typing
 from pathlib import Path
+from camera import DEFAULT_CONFIG
+from blob_detector import DEF
 
 CONFIG_FILE = "config.json"
 ConfigValue = float | int
@@ -12,7 +14,7 @@ class Config:
         self._lock = threading.Lock()
         with self._lock:
             self._values: typing.Dict[str, ConfigValue] = self._load_file()
-        self._defaults: typing.Dict[str, ConfigValue] = {}
+        self._defaults: typing.Dict[str, ConfigValue] = {**}
         self._callbacks: typing.List[typing.Callable[[str, ConfigValue], typing.Any]] = []
 
     def _load_file(self) -> typing.Dict[str, ConfigValue]:

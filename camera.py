@@ -18,6 +18,15 @@ class CameraConfigKeys(str, Enum):
     iso = "iso"
 
 
+DEFAULT_CONFIG = {
+    CameraConfigKeys.resolution_x: 1280,
+    CameraConfigKeys.resolution_y: 720,
+    CameraConfigKeys.fps: 75,
+    CameraConfigKeys.exposure: 150,
+    CameraConfigKeys.iso: 200
+}
+
+
 @dataclass(frozen=True)
 class CameraSocketParams:
     projection: np.ndarray
@@ -40,12 +49,14 @@ class StereoCamera:
     def __init__(
             self, config: Config
     ):
+        self.cam_params_r = None
+        self.cam_params_l = None
+        self.x_out_q = None
+        self.cam_r_ctrl_q = None
+        self.cam_l_ctrl_q = None
+        self.sync = None
+        self.pipeline = None
         self.config = config
-        config.set_default(CameraConfigKeys.resolution_x, 1280)
-        config.set_default(CameraConfigKeys.resolution_y, 720)
-        config.set_default(CameraConfigKeys.fps, 75)
-        config.set_default(CameraConfigKeys.iso, 100)
-        config.set_default(CameraConfigKeys.exposure, 200)
         res_x = config.get("resolution_x")
         res_y = config.get("resolution_y")
         assert isinstance(res_x, int) and isinstance(res_y, int)
@@ -55,6 +66,10 @@ class StereoCamera:
         self.config.add_callback(self.on_config_val_changed)
 
     def __enter__(self) -> "StereoCamera":
+        self.start()
+        return self
+
+    def start(self):
         self.pipeline = dai.Pipeline()
         self.pipeline.setXLinkChunkSize(0)
         self.sync = self.pipeline.create(dai.node.Sync)
@@ -68,10 +83,12 @@ class StereoCamera:
                           int(self.config.get(CameraConfigKeys.iso)))
         calibration = self.pipeline.getCalibrationData()
         self.cam_params_l, self.cam_params_r = self.compute_stereo_rectification(calibration)
-        return self
 
     def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None,
                  exc_tb: TracebackType | None):
+        self.stop()
+
+    def stop(self):
         self.pipeline.stop()
 
     def on_config_val_changed(self, key: str, _: ConfigValue):
@@ -128,7 +145,7 @@ class StereoCamera:
         return (CameraSocketParams(projection_l, intrinsics_l, distortion_l, rotation_l),
                 CameraSocketParams(projection_r, intrinsics_r, distortion_r, rotation_r))
 
-    def get_stereo_frames(self) -> StereoFrame:
+    def get_stereo_frame(self) -> StereoFrame:
         message_group = self.x_out_q.get()
         arrival_time = dai.Clock.now().total_seconds()
         assert isinstance(message_group, dai.MessageGroup)
@@ -150,7 +167,7 @@ class StereoCamera:
             self,
             point_l: typing.Tuple[float, float],
             point_r: typing.Tuple[float, float],
-    ) -> np.ndarray:
+    ) -> typing.Tuple[float, float, float]:
         # cv.triangulatePoints operates on 2xN arrays of points
         points_l = np.array(point_l).reshape(2, 1)
         points_r = np.array(point_r).reshape(2, 1)
@@ -166,10 +183,14 @@ class StereoCamera:
         self.cam_l_ctrl_q.send(msg)
         self.cam_r_ctrl_q.send(msg)
 
-    def rectify_point(self, x: float, y: float, is_left: bool) -> typing.Tuple[float, float]:
+    def get_time(self) -> float:
+        return dai.Clock.now().total_seconds()
+
+    def rectify_points(self, points: typing.List[typing.Tuple[float, float]], is_left: bool) -> typing.List[
+        typing.Tuple[float, float]]:
         # cv2.undistortPoints expects a 1xNx2 or Nx1x2 array
-        pt = np.array([[[x, y]]], dtype=np.float32)
+        pts = np.array(points, dtype=np.float32).reshape(-1, 1, 2)
         params = self.cam_params_l if is_left else self.cam_params_r
-        undistorted = cv2.undistortPoints(pt, params.intrinsics, params.distortion,
+        undistorted = cv2.undistortPoints(pts, params.intrinsics, params.distortion,
                                           R=params.rotation, P=params.projection)
-        return undistorted[0][0][0], undistorted[0][0][1]
+        return [(float(pt[0][0]), float(pt[0][1])) for pt in undistorted]

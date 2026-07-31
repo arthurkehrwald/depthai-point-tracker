@@ -27,6 +27,7 @@ DEFAULT_CONFIG = {
 class Worker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray, np.ndarray)
     centroid_ready = QtCore.Signal(bool, float, float, float, float)
+    candidates_ready = QtCore.Signal(list, list)
     position_ready = QtCore.Signal(bool, float, float, float, float)
     stats_ready = QtCore.Signal(float, float, float, float, float)
 
@@ -46,6 +47,7 @@ class Worker(QtCore.QThread):
                 detections_3d = detect3d(detections_l, detections_r, cam)
 
                 self.frame_ready.emit(stereo_frame.left_frame.copy(), stereo_frame.right_frame.copy())
+                self.candidates_ready.emit(detections_l, detections_r)
                 self.stats_ready.emit(stereo_frame.frame_time_ms, stereo_frame.left_time_of_capture,
                                       stereo_frame.right_time_of_capture, stereo_frame.time_of_arrival,
                                       cam.get_time())
@@ -315,6 +317,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.crosshair_v_l.hide()
         self.crosshair_h_l.hide()
 
+        self.scatter_l = pg.ScatterPlotItem(pxMode=False, pen=pg.mkPen('g', width=5), brush=pg.mkBrush(None))
+        self.vb_l.addItem(self.scatter_l)
+
         self.image_view_r = pg.GraphicsLayoutWidget()
         self.image_view_r.setBackground('gray')
         self.image_view_r.setMinimumSize(300, 200)
@@ -329,6 +334,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vb_r.addItem(self.crosshair_h_r)
         self.crosshair_v_r.hide()
         self.crosshair_h_r.hide()
+
+        self.scatter_r = pg.ScatterPlotItem(pxMode=False, pen=pg.mkPen('g', width=5), brush=pg.mkBrush(None))
+        self.vb_r.addItem(self.scatter_r)
 
         self.pred_marker_r = pg.ScatterPlotItem(size=10, pen=pg.mkPen(None), brush=pg.mkBrush('g'))
         self.vb_r.addItem(self.pred_marker_r)
@@ -406,6 +414,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker = Worker(self.config)
         self.worker.frame_ready.connect(self.on_frame)
         self.worker.centroid_ready.connect(self.on_centroid)
+        self.worker.candidates_ready.connect(self.on_candidates)
         self.worker.position_ready.connect(self.on_position)
         self.worker.stats_ready.connect(self.on_stats)
         self.worker.start()
@@ -463,6 +472,16 @@ class MainWindow(QtWidgets.QMainWindow):
             rotated_frame = cv2.rotate(frame, cv2.ROTATE_180)
             mirrored = cv2.flip(rotated_frame, 1)
             img_item.setImage(mirrored.T, autoLevels=False, levels=(0, 255))
+
+    @QtCore.Slot(list, list)
+    def on_candidates(self, candidates_l: list, candidates_r: list):
+        frame_h = self.cam_resolution[1]
+        for candidates, scatter in [(candidates_l, self.scatter_l), (candidates_r, self.scatter_r)]:
+            spots = []
+            for det in candidates:
+                # OpenCV is Y down, UI is Y up
+                spots.append({'pos': (det.pos[0], frame_h - det.pos[1]), 'size': det.size})
+            scatter.setData(spots)
 
     @QtCore.Slot(bool, float, float, float, float)
     def on_centroid(self, is_detected: bool, pos_2d_raw_l_x: float, pos_2d_raw_l_y: float, pos_2d_raw_r_x: float,

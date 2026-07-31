@@ -1,0 +1,12 @@
+exposure = 150
+iso = 180
+fps = 75
+stereo_conf_threshold = 0.5
+blob_min_threshold = 150
+blob_max_threshold = 250
+blob_threshold_step = 50
+blob_min_area = 5
+blob_max_area = 300
+blob_min_circularity = 0.7
+blob_min_convexity = 0.38
+blob_min_inertia = 0.39

@@ -1,11 +1,15 @@
-import json
 import threading
+import tomllib
 import typing
 from pathlib import Path
-from camera import DEFAULT_CONFIG
-from blob_detector import DEF
 
-CONFIG_FILE = "config.json"
+import tomli_w
+
+import camera
+import blob_detector
+from tracker import DEFAULT_CONFIG as TRACKER_DEFAULTS
+
+CONFIG_FILE = "config.toml"
 ConfigValue = float | int
 
 class Config:
@@ -14,26 +18,23 @@ class Config:
         self._lock = threading.Lock()
         with self._lock:
             self._values: typing.Dict[str, ConfigValue] = self._load_file()
-        self._defaults: typing.Dict[str, ConfigValue] = {**}
-        self._callbacks: typing.List[typing.Callable[[str, ConfigValue], typing.Any]] = []
+        self._defaults: typing.Dict[str, ConfigValue] = {**camera.DEFAULT_CONFIG, **blob_detector.DEFAULT_CONFIG, **TRACKER_DEFAULTS}
+        self._callbacks: typing.List[typing.Callable[[typing.List[str]], typing.Any]] = []
+        self.changed_since_last_callback: typing.List[str] = []
 
     def _load_file(self) -> typing.Dict[str, ConfigValue]:
         if not self._config_path.exists():
             return {}
 
         try:
-            with self._config_path.open("r", encoding="utf-8") as config_file:
-                return json.load(config_file)
-        except (OSError, json.JSONDecodeError):
+            with self._config_path.open("rb") as config_file:
+                return tomllib.load(config_file)
+        except (OSError, tomllib.TOMLDecodeError):
             return {}
-
-
-    def set_default(self, name: str, default: ConfigValue):
-        self._defaults[name] = default
 
     def get(self, name: str) -> ConfigValue:
         with self._lock:
-            return self._values[name]
+            return self._values.get(name, self._defaults[name])
 
     def get_default(self, name: str, default: int | float) -> ConfigValue:
         with self._lock:
@@ -42,19 +43,29 @@ class Config:
     def set(self, name: str, value: ConfigValue) -> None:
         with self._lock:
             self._values[name] = value
-        for cb in self._callbacks:
-            cb(name, value)
+            if name not in self.changed_since_last_callback:
+                self.changed_since_last_callback.append(name)
 
     def save_file(self) -> None:
-        with self._config_path.open("w", encoding="utf-8") as config_file:
-            json.dump(self._values, config_file)
+        with self._config_path.open("wb") as config_file:
+            with self._lock:
+                # Keys are StrEnum members; TOML needs plain strings.
+                tomli_w.dump({str(name): value for name, value in self._values.items()}, config_file)
 
-    def as_dict(self) -> typing.Dict[str, ConfigValue]:
-        return self._values.copy()
-
-    def add_callback(self, cb: typing.Callable[[str, ConfigValue], typing.Any]):
-        self._callbacks.append(cb)
+    def add_callback(self, cb: typing.Callable[[typing.List[str]], typing.Any]):
+        with self._lock:
+            self._callbacks.append(cb)
 
     def remove_callback(self, cb: typing.Callable):
-        if cb in self._callbacks:
-            self._callbacks.remove(cb)
+        with self._lock:
+            if cb in self._callbacks:
+                self._callbacks.remove(cb)
+
+    def do_callbacks(self):
+        with self._lock:
+            if not self.changed_since_last_callback:
+                return
+            changed_copy = self.changed_since_last_callback.copy()
+            self.changed_since_last_callback.clear()
+        for cb in self._callbacks:
+            cb(changed_copy)

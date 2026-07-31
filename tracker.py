@@ -1,14 +1,20 @@
 import math
 import typing
 from dataclasses import dataclass
+from enum import StrEnum
 
 import numpy as np
 
-from udp_sender import UdpSender
-from blob_detector import BlobDetector, Detection2D
+import blob_detector
 from camera import StereoCamera, StereoFrame
-from config import Config
+import config
 
+class TrackerConfigKeys(StrEnum):
+    stereo_conf_threshold = 'stereo_conf_threshold'
+
+DEFAULT_CONFIG = {
+    TrackerConfigKeys.stereo_conf_threshold: 0.5
+}
 
 @dataclass
 class Detection3D:
@@ -78,10 +84,10 @@ def map_open_cv_to_output_coords(pos: typing.Tuple[float, float, float]) -> typi
 
 
 class Tracker:
-    def __init__(self, config: Config):
+    def __init__(self, config: config.Config):
         super().__init__()
         self.config = config
-        self.blob_detector = BlobDetector(self.config)
+        self.blob_detector = blob_detector.BlobDetector(self.config)
 
     def __enter__(self):
         self.stereo_cam = StereoCamera(self.config)
@@ -96,10 +102,11 @@ class Tracker:
 
         detections_l = self.blob_detector.detect_candidates(stereo_frame.left_frame)
         detections_r = self.blob_detector.detect_candidates(stereo_frame.right_frame)
+        best_match = Detection3D(stereo_frame, (0, 0), (0, 0), (0, 0), (0, 0), (0, 0, 0), -1, 0)
+        if not detections_l or not detections_r:
+            return best_match
         rect_coords_l = self.stereo_cam.rectify_points([(d.x, d.y) for d in detections_l], is_left=True)
         rect_coords_r = self.stereo_cam.rectify_points([(d.x, d.y) for d in detections_r], is_left=False)
-
-        best_match = Detection3D(stereo_frame, (0, 0), (0, 0), (0, 0), (0, 0), (0, 0, 0), -1, 0)
 
         for det_l, rect_l in zip(detections_l, rect_coords_l):
             for det_r, rect_r in zip(detections_r, rect_coords_r):
@@ -132,6 +139,6 @@ class Tracker:
                     best_match.pos_2d_rect_l = rect_l
                     best_match.pos_2d_rect_r = rect_r
                     best_match.time_of_processing_finished = self.stereo_cam.get_time()
-                    best_match.confidence_01 = conf
+                    best_match.confidence_01 = float(conf)
 
         return best_match

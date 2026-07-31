@@ -1,7 +1,4 @@
-import math
 import sys
-import socket
-import typing
 
 import numpy as np
 import cv2
@@ -9,115 +6,19 @@ from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 
-from blob_detector import BlobDetector
-from camera import StereoCamera, CameraConfigKeys
+from blob_detector import BlobDetectorConfigKeys
+from camera import CameraConfigKeys
 from config import Config
-from tracker import Tracker
-from udp_sender import UdpSender
-
-
-def logistic_interpolation(
-        val: float,
-        ideal: float,
-        cutoff: float,
-        cutoff2: float | None = None,
-        k: float = 6.0
-) -> float:
-    """
-    Interpolates a float value smoothly between 1.0 (ideal) and 0.0 (cutoff).
-
-    If cutoff2 is provided, the function creates a two-sided curve that transitions
-    to 0.0 on both sides of the ideal value.
-    """
-    # If a second cutoff is given, pick which cutoff applies to the input value
-    if cutoff2 is not None:
-        # Determine which side of ideal the value falls on
-        # Side A: cutoff, Side B: cutoff2
-        if (ideal <= cutoff and val >= ideal) or (ideal >= cutoff and val <= ideal):
-            active_cutoff = cutoff
-        else:
-            active_cutoff = cutoff2
-    else:
-        active_cutoff = cutoff
-
-    if ideal == active_cutoff:
-        raise ValueError("Ideal and active cutoff values cannot be equal.")
-
-    # Relative normalized position: 0.0 at ideal, 1.0 at active_cutoff
-    t = (val - ideal) / (active_cutoff - ideal)
-
-    # Beyond boundary conditions
-    if t <= 0.0:
-        return 1.0
-    if t >= 1.0:
-        return 0.0
-
-    # Map t in (0, 1) to sigmoid domain [-k, k]
-    z = k * (1.0 - 2.0 * t)
-
-    # Standard sigmoid using math module
-    sigmoid = 1.0 / (1.0 + math.exp(-z))
-
-    # Rescale to ensure clean 1.0 and 0.0 endpoints
-    sig_k = 1.0 / (1.0 + math.exp(-k))
-    sig_minus_k = 1.0 / (1.0 + math.exp(k))
-
-    scaled_val = (sigmoid - sig_minus_k) / (sig_k - sig_minus_k)
-
-    return max(0.0, min(1.0, scaled_val))
-
-
-def match_candidates(candidates_l, candidates_r, stereo_cam: StereoCamera, conf_threshold: float):
-    best_match = None
-    highest_confidence = 0
-
-    for candidate_l in candidates_l:
-        x_l_raw, y_l_raw, s_l = candidate_l['raw']
-        x_l_rect, y_l_rect = candidate_l['rect']
-        for candidate_r in candidates_r:
-            x_r_raw, y_r_raw, s_r = candidate_r['raw']
-            x_r_rect, y_r_rect = candidate_r['rect']
-
-            # 1. Epipolar constraint: Corresponding points must have very similar Y-coordinates in image space
-            y_pixel_diff = abs(y_l_rect - y_r_rect)
-
-            # 2. Plausibility of 3D position
-            pos_3d = stereo_cam.triangulate((x_l_rect, y_l_rect), (x_r_rect, y_r_rect))
-
-            # 3. Also consider blob size similarity
-            size_ratio = min(s_l, s_r) / max(s_l, s_r, 1e-6)
-
-            # 4. And absolute size
-            size = s_l + s_r
-
-            weights = [10, 1, 1, 1, 1, 1]
-
-            # Combined score using logistic interpolation
-            conf = np.average([logistic_interpolation(y_pixel_diff, ideal=0, cutoff=3),
-                               logistic_interpolation(pos_3d[0], ideal=0, cutoff=-200, cutoff2=200),
-                               logistic_interpolation(pos_3d[1], ideal=0, cutoff=-100, cutoff2=100),
-                               logistic_interpolation(pos_3d[2], ideal=100, cutoff=0, cutoff2=300),
-                               logistic_interpolation(size_ratio, ideal=1, cutoff=0),
-                               logistic_interpolation(size, ideal=20, cutoff=5)], weights=weights)
-
-            if conf > highest_confidence and conf > conf_threshold:
-                highest_confidence = conf
-                best_match = {
-                    'left_raw': (x_l_raw, y_l_raw, s_l),
-                    'right_raw': (x_r_raw, y_r_raw, s_r),
-                    'pos_3d': pos_3d,
-                    'confidence': highest_confidence
-                }
-    return best_match
+from tracker import Tracker, TrackerConfigKeys
 
 
 class Worker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray, np.ndarray)
-    centroid_ready = QtCore.Signal(bool, typing.Tuple[float, float], typing.Tuple[float, float], typing.Tuple[int, int])
-    position_ready = QtCore.Signal(np.ndarray)
+    centroid_ready = QtCore.Signal(bool, float, float, float, float)
+    position_ready = QtCore.Signal(float, float, float)
     stats_ready = QtCore.Signal(float, float, float, float, float)
 
-    def __init__(self, config):
+    def __init__(self, config: Config):
         super().__init__()
         self.config = config
         self.running = True
@@ -128,14 +29,17 @@ class Worker(QtCore.QThread):
                 detection = tracker.detect()
 
                 self.frame_ready.emit(detection.frame.left_frame.copy(), detection.frame.right_frame.copy())
-                self.stats_ready.emit(detection.frame.frame_time, detection.frame.left_time_of_capture,
+                self.stats_ready.emit(detection.frame.frame_time_ms, detection.frame.left_time_of_capture,
                                       detection.frame.right_time_of_capture, detection.frame.time_of_arrival,
                                       detection.time_of_processing_finished)
-                found = detection.confidence_01 >= self.config.get_default("detection_confidence_threshold", 0.5)
-                resolution = detection.frame.left_frame.shape[1], detection.frame.left_frame.shape[0]
-                self.centroid_ready.emit(found, detection.pos_2d_raw_l, detection.pos_2d_raw_r, resolution)
+                found = detection.confidence_01 >= self.config.get(TrackerConfigKeys.stereo_conf_threshold)
+                self.centroid_ready.emit(found, detection.pos_2d_raw_l[0], detection.pos_2d_raw_l[1],
+                                         detection.pos_2d_raw_r[0],
+                                         detection.pos_2d_raw_r[1])
                 if found:
-                    self.position_ready.emit(detection.pos_3d)
+                    self.position_ready.emit(detection.pos_3d[0], detection.pos_3d[1], detection.pos_3d[2])
+
+                self.config.do_callbacks()
 
     def stop(self):
         self.running = False
@@ -164,22 +68,23 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(QtWidgets.QLabel("<b>Camera Settings</b>"))
 
         # Resolution
-        self.initial_resolution = self.config.get('resolution')
         controls_layout.addWidget(QtWidgets.QLabel("Resolution:"))
         self.res_combo = QtWidgets.QComboBox()
         self.res_options = [(1280, 800), (1280, 720), (640, 400)]
         for w, h in self.res_options:
             self.res_combo.addItem(f"{w}x{h}")
-        current_res = tuple(self.config.get('resolution'))
-        if current_res in self.res_options:
-            self.res_combo.setCurrentIndex(self.res_options.index(current_res))
+        self.cam_resolution = int(self.config.get(CameraConfigKeys.resolution_x)), int(
+            self.config.get(CameraConfigKeys.resolution_y))
+        if self.cam_resolution in self.res_options:
+            self.res_combo.setCurrentIndex(self.res_options.index(self.cam_resolution))
         controls_layout.addWidget(self.res_combo)
 
         # Framerate
         controls_layout.addWidget(QtWidgets.QLabel("Framerate (FPS):"))
         self.fps_spin = QtWidgets.QSpinBox()
         self.fps_spin.setRange(30, 100)
-        self.fps_spin.setValue(self.config.get('fps', DEFAULT_FPS))
+        self.cam_fps = int(self.config.get(CameraConfigKeys.fps))
+        self.fps_spin.setValue(self.cam_fps)
         controls_layout.addWidget(self.fps_spin)
 
         # Restart warning
@@ -194,10 +99,11 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(QtWidgets.QLabel("Exposure (\u03bcs):"))
         self.exp_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.exp_slider.setRange(1, 3000)
-        self.exp_slider.setValue(self.config['exposure'])
+        exposure = int(self.config.get(CameraConfigKeys.exposure))
+        self.exp_slider.setValue(exposure)
         self.exp_spin = QtWidgets.QSpinBox()
         self.exp_spin.setRange(1, 33000)
-        self.exp_spin.setValue(self.config['exposure'])
+        self.exp_spin.setValue(exposure)
         exp_h = QtWidgets.QHBoxLayout()
         exp_h.addWidget(self.exp_slider)
         exp_h.addWidget(self.exp_spin)
@@ -207,10 +113,11 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(QtWidgets.QLabel("ISO:"))
         self.iso_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.iso_slider.setRange(100, 1600)
-        self.iso_slider.setValue(self.config['iso'])
+        iso = int(self.config.get(CameraConfigKeys.iso))
+        self.iso_slider.setValue(iso)
         self.iso_spin = QtWidgets.QSpinBox()
         self.iso_spin.setRange(100, 1600)
-        self.iso_spin.setValue(self.config['iso'])
+        self.iso_spin.setValue(iso)
         iso_h = QtWidgets.QHBoxLayout()
         iso_h.addWidget(self.iso_slider)
         iso_h.addWidget(self.iso_spin)
@@ -224,10 +131,12 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(QtWidgets.QLabel("Blob Threshold (Min/Max):"))
         self.blob_min_thresh_spin = QtWidgets.QSpinBox()
         self.blob_min_thresh_spin.setRange(0, 255)
-        self.blob_min_thresh_spin.setValue(self.config['blob_min_threshold'])
+        blob_min_thresh = int(self.config.get(BlobDetectorConfigKeys.min_threshold))
+        self.blob_min_thresh_spin.setValue(blob_min_thresh)
         self.blob_max_thresh_spin = QtWidgets.QSpinBox()
         self.blob_max_thresh_spin.setRange(0, 255)
-        self.blob_max_thresh_spin.setValue(self.config['blob_max_threshold'])
+        blob_max_thresh = int(self.config.get(BlobDetectorConfigKeys.max_threshold))
+        self.blob_max_thresh_spin.setValue(blob_max_thresh)
         blob_thresh_h = QtWidgets.QHBoxLayout()
         blob_thresh_h.addWidget(self.blob_min_thresh_spin)
         blob_thresh_h.addWidget(self.blob_max_thresh_spin)
@@ -237,17 +146,21 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(QtWidgets.QLabel("Blob Threshold Step:"))
         self.blob_thresh_step_spin = QtWidgets.QSpinBox()
         self.blob_thresh_step_spin.setRange(1, 100)
-        self.blob_thresh_step_spin.setValue(self.config.get('blob_threshold_step', 10))
+        blob_thresh_step = int(self.config.get(BlobDetectorConfigKeys.threshold_step))
+        self.blob_thresh_step_spin.setValue(blob_thresh_step)
         controls_layout.addWidget(self.blob_thresh_step_spin)
 
         # Blob Min/Max Area
         controls_layout.addWidget(QtWidgets.QLabel("Blob Area (Min/Max):"))
         self.blob_min_area_spin = QtWidgets.QSpinBox()
         self.blob_min_area_spin.setRange(1, 10000)
-        self.blob_min_area_spin.setValue(self.config['blob_min_area'])
+        blob_min_area = int(self.config.get(BlobDetectorConfigKeys.min_area))
+        self.blob_min_area_spin.setValue(blob_min_area)
         self.blob_max_area_spin = QtWidgets.QSpinBox()
         self.blob_max_area_spin.setRange(1, 10000)
-        self.blob_max_area_spin.setValue(self.config['blob_max_area'])
+        blob_max_area = int(self.config.get(BlobDetectorConfigKeys.max_area))
+        self.blob_min_area_spin.setValue(blob_min_area)
+        self.blob_max_area_spin.setValue(blob_max_area)
         blob_area_h = QtWidgets.QHBoxLayout()
         blob_area_h.addWidget(self.blob_min_area_spin)
         blob_area_h.addWidget(self.blob_max_area_spin)
@@ -257,11 +170,12 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(QtWidgets.QLabel("Min Circularity:"))
         self.blob_circ_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.blob_circ_slider.setRange(0, 100)
-        self.blob_circ_slider.setValue(int(self.config['blob_min_circularity'] * 100))
+        blob_min_circularity = float(self.config.get(BlobDetectorConfigKeys.min_circularity))
+        self.blob_circ_slider.setValue(int(blob_min_circularity * 100))
         self.blob_circ_spin = QtWidgets.QDoubleSpinBox()
         self.blob_circ_spin.setRange(0.0, 1.0)
         self.blob_circ_spin.setSingleStep(0.05)
-        self.blob_circ_spin.setValue(self.config['blob_min_circularity'])
+        self.blob_circ_spin.setValue(blob_min_circularity)
         blob_circ_h = QtWidgets.QHBoxLayout()
         blob_circ_h.addWidget(self.blob_circ_slider)
         blob_circ_h.addWidget(self.blob_circ_spin)
@@ -271,11 +185,12 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(QtWidgets.QLabel("Min Convexity:"))
         self.blob_conv_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.blob_conv_slider.setRange(0, 100)
-        self.blob_conv_slider.setValue(int(self.config['blob_min_convexity'] * 100))
+        blob_min_convexity = float(self.config.get(BlobDetectorConfigKeys.min_convexity))
+        self.blob_conv_slider.setValue(int(blob_min_convexity * 100))
         self.blob_conv_spin = QtWidgets.QDoubleSpinBox()
         self.blob_conv_spin.setRange(0.0, 1.0)
         self.blob_conv_spin.setSingleStep(0.05)
-        self.blob_conv_spin.setValue(self.config['blob_min_convexity'])
+        self.blob_conv_spin.setValue(blob_min_convexity)
         blob_conv_h = QtWidgets.QHBoxLayout()
         blob_conv_h.addWidget(self.blob_conv_slider)
         blob_conv_h.addWidget(self.blob_conv_spin)
@@ -285,11 +200,12 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(QtWidgets.QLabel("Min Inertia Ratio:"))
         self.blob_inert_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.blob_inert_slider.setRange(0, 100)
-        self.blob_inert_slider.setValue(int(self.config['blob_min_inertia'] * 100))
+        blob_min_inertia = float(self.config.get(BlobDetectorConfigKeys.min_inertia))
+        self.blob_inert_slider.setValue(int(blob_min_inertia * 100))
         self.blob_inert_spin = QtWidgets.QDoubleSpinBox()
         self.blob_inert_spin.setRange(0.0, 1.0)
         self.blob_inert_spin.setSingleStep(0.05)
-        self.blob_inert_spin.setValue(self.config['blob_min_inertia'])
+        self.blob_inert_spin.setValue(blob_min_inertia)
         blob_inert_h = QtWidgets.QHBoxLayout()
         blob_inert_h.addWidget(self.blob_inert_slider)
         blob_inert_h.addWidget(self.blob_inert_spin)
@@ -301,12 +217,12 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(QtWidgets.QLabel("Confidence Threshold:"))
         self.stereo_conf_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.stereo_conf_slider.setRange(0, 100)
-        self.stereo_conf_slider.setValue(
-            int(self.config.get('stereo_conf_threshold', DEFAULT_STEREO_CONF_THRESHOLD) * 100))
+        stereo_conf_thresh = float(self.config.get(TrackerConfigKeys.stereo_conf_threshold))
+        self.stereo_conf_slider.setValue(int(stereo_conf_thresh * 100))
         self.stereo_conf_spin = QtWidgets.QDoubleSpinBox()
         self.stereo_conf_spin.setRange(0.0, 1.0)
         self.stereo_conf_spin.setSingleStep(0.05)
-        self.stereo_conf_spin.setValue(self.config.get('stereo_conf_threshold', DEFAULT_STEREO_CONF_THRESHOLD))
+        self.stereo_conf_spin.setValue(stereo_conf_thresh)
         stereo_conf_h = QtWidgets.QHBoxLayout()
         stereo_conf_h.addWidget(self.stereo_conf_slider)
         stereo_conf_h.addWidget(self.stereo_conf_spin)
@@ -382,8 +298,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # left and right previews have the same shape/aspect ratio right from
         # startup (before any real frame has been received from the worker),
         # and lock their views together so they always stay in sync.
-        blank_w, blank_h = self.config.get('resolution', DEFAULT_RESOLUTION)
-        blank_frame = np.zeros((blank_w, blank_h), dtype=np.uint8)
+        blank_frame = np.zeros(self.cam_resolution, dtype=np.uint8)
         # Disable pyqtgraph's automatic level (brightness/contrast) scaling so the
         # preview reflects the camera's actual exposure instead of being
         # auto-stretched to the min/max of each frame, which otherwise makes
@@ -426,17 +341,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.iso_slider.valueChanged.connect(self.iso_spin.setValue)
         self.iso_spin.valueChanged.connect(self.update_iso)
 
-        self.blob_min_thresh_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_threshold", v))
-        self.blob_max_thresh_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_max_threshold", v))
-        self.blob_thresh_step_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_threshold_step", v))
-        self.blob_min_area_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_area", v))
-        self.blob_max_area_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_max_area", v))
+        self.blob_min_thresh_spin.valueChanged.connect(
+            lambda v: self.update_blob_param(BlobDetectorConfigKeys.min_threshold, v))
+        self.blob_max_thresh_spin.valueChanged.connect(
+            lambda v: self.update_blob_param(BlobDetectorConfigKeys.max_threshold, v))
+        self.blob_thresh_step_spin.valueChanged.connect(
+            lambda v: self.update_blob_param(BlobDetectorConfigKeys.threshold_step, v))
+        self.blob_min_area_spin.valueChanged.connect(
+            lambda v: self.update_blob_param(BlobDetectorConfigKeys.min_area, v))
+        self.blob_max_area_spin.valueChanged.connect(
+            lambda v: self.update_blob_param(BlobDetectorConfigKeys.max_area, v))
         self.blob_circ_slider.valueChanged.connect(lambda v: self.blob_circ_spin.setValue(v / 100.0))
-        self.blob_circ_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_circularity", v))
+        self.blob_circ_spin.valueChanged.connect(
+            lambda v: self.update_blob_param(BlobDetectorConfigKeys.min_circularity, v))
         self.blob_conv_slider.valueChanged.connect(lambda v: self.blob_conv_spin.setValue(v / 100.0))
-        self.blob_conv_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_convexity", v))
+        self.blob_conv_spin.valueChanged.connect(
+            lambda v: self.update_blob_param(BlobDetectorConfigKeys.min_convexity, v))
         self.blob_inert_slider.valueChanged.connect(lambda v: self.blob_inert_spin.setValue(v / 100.0))
-        self.blob_inert_spin.valueChanged.connect(lambda v: self.update_blob_param("blob_min_inertia", v))
+        self.blob_inert_spin.valueChanged.connect(
+            lambda v: self.update_blob_param(BlobDetectorConfigKeys.min_inertia, v))
         self.stereo_conf_slider.valueChanged.connect(lambda v: self.stereo_conf_spin.setValue(v / 100.0))
         self.stereo_conf_spin.valueChanged.connect(self.update_stereo_conf)
 
@@ -449,37 +372,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.start()
 
     def update_exposure(self, val):
-        self.worker.exposure = val
         self.config.set(CameraConfigKeys.exposure, val)
         self.exp_slider.blockSignals(True)
         self.exp_slider.setValue(val)
         self.exp_slider.blockSignals(False)
 
     def update_iso(self, val):
-        self.worker.iso = val
-        self.worker.settings_changed = True
+        self.config.set(CameraConfigKeys.iso, val)
         self.iso_slider.blockSignals(True)
         self.iso_slider.setValue(val)
         self.iso_slider.blockSignals(False)
 
-    def update_blob_param(self, name, val):
-        self.worker.blob_params[name] = val
-        self.worker.blob_settings_changed = True
-        if name == "blob_min_circularity":
+    def update_blob_param(self, name: str, val: int | float):
+        self.config.set(name, val)
+        if name == BlobDetectorConfigKeys.min_circularity:
             self.blob_circ_slider.blockSignals(True)
             self.blob_circ_slider.setValue(int(val * 100))
             self.blob_circ_slider.blockSignals(False)
-        elif name == "blob_min_convexity":
+        elif name == BlobDetectorConfigKeys.min_convexity:
             self.blob_conv_slider.blockSignals(True)
             self.blob_conv_slider.setValue(int(val * 100))
             self.blob_conv_slider.blockSignals(False)
-        elif name == "blob_min_inertia":
+        elif name == BlobDetectorConfigKeys.min_inertia:
             self.blob_inert_slider.blockSignals(True)
             self.blob_inert_slider.setValue(int(val * 100))
             self.blob_inert_slider.blockSignals(False)
 
-    def update_stereo_conf(self, val):
-        self.worker.stereo_conf_threshold = val
+    def update_stereo_conf(self, val: float):
+        self.config.set(TrackerConfigKeys.stereo_conf_threshold, val)
         self.stereo_conf_slider.blockSignals(True)
         self.stereo_conf_slider.setValue(int(val * 100))
         self.stereo_conf_slider.blockSignals(False)
@@ -491,41 +411,43 @@ class MainWindow(QtWidgets.QMainWindow):
             mirrored = cv2.flip(rotated_frame, 1)
             img_item.setImage(mirrored.T, autoLevels=False, levels=(0, 255))
 
-    @QtCore.Slot(bool, typing.Tuple[float, float], typing.Tuple[float, float], typing.Tuple[int, int])
-    def on_centroid(self, is_detected: bool, pos_2d_raw_l: typing.Tuple[float, float],
-                    pos_2d_raw_r: typing.Tuple[float, float], resolution: typing.Tuple[int, int]):
+    @QtCore.Slot(bool, float, float, float, float)
+    def on_centroid(self, is_detected: bool, pos_2d_raw_l_x: float, pos_2d_raw_l_y: float, pos_2d_raw_r_x: float,
+                    pos_2d_raw_r_y: float):
         # Update Left
         if is_detected:
-            frame_h = self.worker.resolution[1]
+            frame_h = self.cam_resolution[1]
             # OpenCV is Y down, UI is Y up
-            y_l = frame_h - pos_2d_raw_l[1]
-            y_r = frame_h - pos_2d_raw_r[1]
-            self.crosshair_v_l.setPos(pos_2d_raw_l[0])
+            y_l = frame_h - pos_2d_raw_l_y
+            y_r = frame_h - pos_2d_raw_r_y
+            text_l = f"L: {pos_2d_raw_l_x:.1f}, {y_l:.1f}"
+            text_r = f"R: {pos_2d_raw_r_x:.1f}, {y_r:.1f}"
+            self.crosshair_v_l.setPos(pos_2d_raw_l_x)
             self.crosshair_h_l.setPos(y_l)
             self.crosshair_v_l.show()
             self.crosshair_h_l.show()
-            self.crosshair_v_r.setPos(pos_2d_raw_r[0])
+            self.crosshair_v_r.setPos(pos_2d_raw_r_x)
             self.crosshair_h_r.setPos(y_r)
             self.crosshair_v_r.show()
             self.crosshair_h_r.show()
         else:
+            text_l = "L: N/A"
+            text_r = "R: N/A"
             self.crosshair_v_l.hide()
             self.crosshair_h_l.hide()
             self.crosshair_v_r.hide()
             self.crosshair_h_r.hide()
 
-        text_l = f"L: {x_l:.1f}, {y_l:.1f}" if is_detected else "L: N/A"
-        text_r = f"R: {x_r:.1f}, {y_r:.1f}" if is_detected else "R: N/A"
         self.centroid_label.setText(f"Centroid: {text_l} | {text_r}")
 
-    @QtCore.Slot(np.ndarray)
-    def on_position(self, pos):
-        self.pos_label.setText(f"XYZ: {pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}")
+    @QtCore.Slot(float, float, float)
+    def on_position(self, pos_x: float, pos_y: float, pos_z: float):
+        self.pos_label.setText(f"XYZ: {pos_x:.2f}, {pos_y:.2f}, {pos_z:.2f}")
         # Flip z and y to transform to the space of the UI view
-        self.pos_marker.setData(pos=np.array([[pos[0], pos[2], pos[1]]]))
-        self.data_x.append(pos[0])
-        self.data_y.append(pos[1])
-        self.data_z.append(pos[2])
+        self.pos_marker.setData(pos=np.array([[pos_x, pos_z, pos_y]]))
+        self.data_x.append(pos_x)
+        self.data_y.append(pos_y)
+        self.data_z.append(pos_z)
         if len(self.data_x) > self.max_points:
             self.data_x.pop(0)
             self.data_y.pop(0)
@@ -539,7 +461,7 @@ class MainWindow(QtWidgets.QMainWindow):
                  time_of_3d_detection: float):
         fps = float(1000.0 / frame_time)
         self.frame_time_label.setText(f"Frame time: {frame_time:.1f}ms ({fps:.1f} FPS)")
-        l_arrival = (time_of_capture_l - time_of_arrival) * 1e3
+        l_arrival = (time_of_arrival - time_of_capture_l) * 1e3
         self.capture_latency_label.setText(f"Capture latency: {l_arrival:.1f}ms")
         if time_of_3d_detection >= 0:
             l_processing = (time_of_3d_detection - time_of_arrival) * 1e3

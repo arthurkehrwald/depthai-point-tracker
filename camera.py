@@ -1,16 +1,16 @@
 import typing
 from dataclasses import dataclass
 from types import TracebackType
-from enum import Enum
+from enum import StrEnum
 
 import cv2
 import depthai as dai
 import numpy as np
 
-from config import Config, ConfigValue
+import config
 
 
-class CameraConfigKeys(str, Enum):
+class CameraConfigKeys(StrEnum):
     resolution_x = "resolution_x"
     resolution_y = "resolution_y"
     fps = "fps"
@@ -47,7 +47,7 @@ class StereoFrame:
 
 class StereoCamera:
     def __init__(
-            self, config: Config
+            self, config: config.Config
     ):
         self.cam_params_r = None
         self.cam_params_l = None
@@ -63,13 +63,13 @@ class StereoCamera:
         self.resolution = (res_x, res_y)
         self.fps = config.get("fps")
         self.prev_frame_arrival_time = -1.0
-        self.config.add_callback(self.on_config_val_changed)
 
     def __enter__(self) -> "StereoCamera":
         self.start()
         return self
 
     def start(self):
+        self.config.add_callback(self.on_config_val_changed)
         self.pipeline = dai.Pipeline()
         self.pipeline.setXLinkChunkSize(0)
         self.sync = self.pipeline.create(dai.node.Sync)
@@ -89,10 +89,11 @@ class StereoCamera:
         self.stop()
 
     def stop(self):
+        self.config.remove_callback(self.on_config_val_changed)
         self.pipeline.stop()
 
-    def on_config_val_changed(self, key: str, _: ConfigValue):
-        if key in [CameraConfigKeys.exposure, CameraConfigKeys.iso]:
+    def on_config_val_changed(self, changed: typing.List[str]):
+        if any(key in [CameraConfigKeys.exposure, CameraConfigKeys.iso] for key in changed):
             self.set_exposure(int(self.config.get(CameraConfigKeys.exposure)),
                               int(self.config.get(CameraConfigKeys.iso)))
 
@@ -156,7 +157,7 @@ class StereoCamera:
         self.prev_frame_arrival_time = arrival_time
         return StereoFrame(
             left_frame=raw_frame_l.getCvFrame(),
-            right_frame=raw_frame_l.getCvFrame(),
+            right_frame=raw_frame_r.getCvFrame(),
             frame_time_ms=frame_time_ms,
             left_time_of_capture=raw_frame_l.getTimestamp().total_seconds(),
             right_time_of_capture=raw_frame_r.getTimestamp().total_seconds(),

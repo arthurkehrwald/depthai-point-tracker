@@ -33,10 +33,6 @@ class Config:
         with self._lock:
             return self._values.get(name, self._defaults[name])
 
-    def get_default(self, name: str, default: int | float) -> ConfigValue:
-        with self._lock:
-            return self._values.get(name, default)
-
     def set(self, name: str, value: ConfigValue) -> None:
         with self._lock:
             self._values[name] = value

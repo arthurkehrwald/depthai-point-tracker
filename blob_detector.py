@@ -44,22 +44,22 @@ class BlobDetector:
 
     def update_params(self):
         params = cv2.SimpleBlobDetector.Params()
-        params.minThreshold = self.config.get_default("blob_min_threshold", 80)
-        params.maxThreshold = self.config.get_default("blob_max_threshold", 255)
-        params.thresholdStep = self.config.get_default("blob_threshold_step", 10)
+        params.minThreshold = self.config.get(BlobDetectorConfigKeys.min_threshold)
+        params.maxThreshold = self.config.get(BlobDetectorConfigKeys.max_threshold)
+        params.thresholdStep = self.config.get(BlobDetectorConfigKeys.threshold_step)
         params.maxThreshold = max(params.maxThreshold, params.minThreshold)
         params.filterByColor = True
         params.blobColor = 255
         params.filterByArea = True
-        params.minArea = self.config.get_default("blob_min_area", 20)
-        params.maxArea = self.config.get_default("blob_max_area", 1000)
+        params.minArea = self.config.get(BlobDetectorConfigKeys.min_area)
+        params.maxArea = self.config.get(BlobDetectorConfigKeys.max_area)
         params.maxArea = max(params.maxArea, params.minArea)
         params.filterByCircularity = True
-        params.minCircularity = max(0.01, self.config.get_default("blob_min_circularity", 0.7))
+        params.minCircularity = max(0.01, self.config.get(BlobDetectorConfigKeys.min_circularity))
         params.filterByConvexity = True
-        params.minConvexity = max(0.01, self.config.get_default("blob_min_convexity", 0.9))
+        params.minConvexity = max(0.01, self.config.get(BlobDetectorConfigKeys.min_convexity))
         params.filterByInertia = True
-        params.minInertiaRatio = max(0.01, self.config.get_default("blob_min_inertia", 0.6))
+        params.minInertiaRatio = max(0.01, self.config.get(BlobDetectorConfigKeys.min_inertia))
         params.minRepeatability = 1
         self.detector = cv2.SimpleBlobDetector.create(params)
 

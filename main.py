@@ -27,7 +27,7 @@ DEFAULT_CONFIG = {
 class Worker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray, np.ndarray)
     centroid_ready = QtCore.Signal(bool, float, float, float, float)
-    position_ready = QtCore.Signal(bool, float, float, float)
+    position_ready = QtCore.Signal(bool, float, float, float, float)
     stats_ready = QtCore.Signal(float, float, float, float, float)
 
     def __init__(self, config: Config):
@@ -55,10 +55,11 @@ class Worker(QtCore.QThread):
                     self.centroid_ready.emit(True, detection.pos_2d_raw_l[0], detection.pos_2d_raw_l[1],
                                              detection.pos_2d_raw_r[0],
                                              detection.pos_2d_raw_r[1])
-                    self.position_ready.emit(True, detection.pos_3d[0], detection.pos_3d[1], detection.pos_3d[2])
+                    self.position_ready.emit(True, detection.pos_3d[0], detection.pos_3d[1], detection.pos_3d[2],
+                                             detection.confidence_01)
                 else:
                     self.centroid_ready.emit(False, 0, 0, 0, 0)
-                    self.position_ready.emit(False, 0, 0, 0)
+                    self.position_ready.emit(False, 0, 0, 0, 0)
 
                 self.config.do_callbacks()
 
@@ -109,6 +110,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fps_spin.setRange(30, 100)
         self.cam_fps = int(self.config.get(CameraConfigKeys.fps))
         self.fps_spin.setValue(self.cam_fps)
+        self.target_fps = self.cam_fps
         controls_layout.addWidget(self.fps_spin)
 
         # Restart warning
@@ -264,6 +266,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pos_label = QtWidgets.QLabel("XYZ: N/A")
         self.pos_label.setFont(monospace_font)
         controls_layout.addWidget(self.pos_label)
+        self.conf_label = QtWidgets.QLabel("Confidence: N/A")
+        self.conf_label.setFont(monospace_font)
+        controls_layout.addWidget(self.conf_label)
 
         controls_layout.addSpacing(10)
         controls_layout.addWidget(QtWidgets.QLabel("<b>Timing Info</b>"))
@@ -438,6 +443,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stereo_conf_slider.setValue(int(val * 100))
         self.stereo_conf_slider.blockSignals(False)
 
+    def _get_color(self, val: float, green_val: float, red_val: float) -> str:
+        """Returns a hex color string interpolating between green and red."""
+        if green_val == red_val:
+            return "#00FF00"
+        # Normalized position: 0 at green_val, 1 at red_val
+        t = (val - green_val) / (red_val - green_val)
+        t = max(0.0, min(1.0, t))
+
+        # Green: #00FF00 (0, 255, 0), Red: #FF0000 (255, 0, 0)
+        r = int(255 * t)
+        g = int(255 * (1.0 - t))
+        b = 0
+        return f"#{r:02x}{g:02x}{b:02x}"
+
     @QtCore.Slot(np.ndarray, np.ndarray)
     def on_frame(self, frame_l: np.ndarray, frame_r: np.ndarray):
         for frame, img_item in [(frame_l, self.img_item_l), (frame_r, self.img_item_r)]:
@@ -475,10 +494,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.left_centroid_label.setText(f"Centroid L: {text_l}")
         self.right_centroid_label.setText(f"Centroid R: {text_r}")
 
-    @QtCore.Slot(bool, float, float, float)
-    def on_position(self, found: bool, pos_x: float, pos_y: float, pos_z: float):
+    @QtCore.Slot(bool, float, float, float, float)
+    def on_position(self, found: bool, pos_x: float, pos_y: float, pos_z: float, confidence: float):
         text = f"XYZ: {pos_x:7.2f}, {pos_y:7.2f}, {pos_z:7.2f}" if found else "XYZ: N/A"
         self.pos_label.setText(text)
+        conf_text = f"Confidence: {confidence:3.2f}"
+        self.conf_label.setText(conf_text)
+        color = self._get_color(confidence, 1.0, 0.0)
+        self.conf_label.setStyleSheet(f"background-color: {color};")
         if found:
             # Flip z and y to transform to the space of the UI view
             self.pos_marker.setData(pos=np.array([[pos_x, pos_z, pos_y]]))
@@ -498,19 +521,35 @@ class MainWindow(QtWidgets.QMainWindow):
                  time_of_3d_detection: float):
         fps = float(1000.0 / frame_time)
         self.frame_time_label.setText(f"Frame time: {frame_time:5.1f}ms ({fps:5.1f} FPS)")
+        target_period = 1000.0 / self.target_fps
+        ft_color = self._get_color(frame_time, target_period, 1.2 * target_period)
+        self.frame_time_label.setStyleSheet(f"background-color: {ft_color};")
+
         l_arrival = (time_of_arrival - time_of_capture_l) * 1e3
         self.capture_latency_label.setText(f"Capture latency: {l_arrival:5.1f}ms")
+        cl_color = self._get_color(l_arrival, 15, 50)
+        self.capture_latency_label.setStyleSheet(f"background-color: {cl_color};")
+
         if time_of_3d_detection >= 0:
             l_processing = (time_of_3d_detection - time_of_arrival) * 1e3
             self.processing_latency_label.setText(f"Processing latency: {l_processing:5.1f}ms")
+            pl_color = self._get_color(l_processing, 1, 5)
+            self.processing_latency_label.setStyleSheet(f"background-color: {pl_color};")
+
             l_total = l_arrival + l_processing
             self.total_latency_label.setText(f"Total latency: {l_total:5.1f}ms")
+            tl_color = self._get_color(l_total, 16, 55)
+            self.total_latency_label.setStyleSheet(f"background-color: {tl_color};")
         else:
             self.processing_latency_label.setText("Processing latency: N/A")
+            self.processing_latency_label.setStyleSheet("")
             self.total_latency_label.setText("Total latency: N/A")
+            self.total_latency_label.setStyleSheet("")
 
         diff_ts = (time_of_capture_r - time_of_capture_l) * 1e6
         self.lr_diff_label.setText(f"L-R frame diff: {diff_ts:5.1f}µs")
+        lr_color = self._get_color(diff_ts, 20, 100)
+        self.lr_diff_label.setStyleSheet(f"background-color: {lr_color};")
 
     def closeEvent(self, event):
         self.worker.stop()

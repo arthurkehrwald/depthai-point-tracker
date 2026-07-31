@@ -9,6 +9,7 @@ import pyqtgraph.opengl as gl
 
 import blob_detector
 import camera
+import recorder
 from blob_detector import BlobDetectorConfigKeys, BlobDetector
 from camera import CameraConfigKeys, StereoCamera
 from config import Config
@@ -30,6 +31,8 @@ class Worker(QtCore.QThread):
     candidates_ready = QtCore.Signal(list, list)
     position_ready = QtCore.Signal(bool, float, float, float, float)
     stats_ready = QtCore.Signal(float, float, float, float, float)
+    recording_active = False
+    recorder = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -59,6 +62,9 @@ class Worker(QtCore.QThread):
                                              detection.pos_2d_raw_r[1])
                     self.position_ready.emit(True, detection.pos_3d[0], detection.pos_3d[1], detection.pos_3d[2],
                                              detection.confidence_01)
+                    if self.recording_active and self.recorder:
+                        self.recorder.record(detection.pos_3d[0], detection.pos_3d[1], detection.pos_3d[2],
+                                             stereo_frame.left_time_of_capture, detection.confidence_01)
                 else:
                     self.centroid_ready.emit(False, 0, 0, 0, 0)
                     self.position_ready.emit(False, 0, 0, 0, 0)
@@ -256,6 +262,12 @@ class MainWindow(QtWidgets.QMainWindow):
         stereo_conf_h.addWidget(self.stereo_conf_spin)
         controls_layout.addLayout(stereo_conf_h)
 
+        controls_layout.addSpacing(20)
+        self.record_button = QtWidgets.QPushButton("Start Recording")
+        self.record_button.setCheckable(True)
+        self.record_button.clicked.connect(self.toggle_recording)
+        controls_layout.addWidget(self.record_button)
+
         # Info
         controls_layout.addStretch()
         controls_layout.addWidget(QtWidgets.QLabel("<b>Tracking Info</b>"))
@@ -451,6 +463,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stereo_conf_slider.blockSignals(True)
         self.stereo_conf_slider.setValue(int(val * 100))
         self.stereo_conf_slider.blockSignals(False)
+
+    def toggle_recording(self, checked: bool):
+        if checked:
+            if not self.worker.recorder:
+                self.worker.recorder = recorder.Recorder()
+            self.worker.recorder.start()
+            self.worker.recording_active = True
+            self.record_button.setText("Stop Recording")
+        else:
+            self.worker.recording_active = False
+            if self.worker.recorder:
+                self.worker.recorder.stop()
+            self.record_button.setText("Start Recording")
 
     def _get_color(self, val: float, green_val: float, red_val: float) -> str:
         """Returns a hex color string interpolating between green and red."""

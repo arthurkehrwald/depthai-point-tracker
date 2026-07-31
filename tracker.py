@@ -18,55 +18,17 @@ class Detection3D:
     confidence_01: float
 
 
-def logistic_interpolation(
-        val: float,
-        ideal: float,
-        cutoff: float,
-        cutoff2: float | None = None,
-        k: float = 6.0
-) -> float:
-    """
-    Interpolates a float value smoothly between 1.0 (ideal) and 0.0 (cutoff).
-
-    If cutoff2 is provided, the function creates a two-sided curve that transitions
-    to 0.0 on both sides of the ideal value.
-    """
-    # If a second cutoff is given, pick which cutoff applies to the input value
-    if cutoff2 is not None:
-        # Determine which side of ideal the value falls on
-        # Side A: cutoff, Side B: cutoff2
-        if (ideal <= cutoff and val >= ideal) or (ideal >= cutoff and val <= ideal):
-            active_cutoff = cutoff
-        else:
-            active_cutoff = cutoff2
-    else:
-        active_cutoff = cutoff
-
-    if ideal == active_cutoff:
-        raise ValueError("Ideal and active cutoff values cannot be equal.")
-
-    # Relative normalized position: 0.0 at ideal, 1.0 at active_cutoff
-    t = (val - ideal) / (active_cutoff - ideal)
-
-    # Beyond boundary conditions
-    if t <= 0.0:
-        return 1.0
-    if t >= 1.0:
+def normalize(val: float, min_ideal: float, max_ideal: float, min_cutoff: float, max_cutoff: float) -> float:
+    if val < min_cutoff:
         return 0.0
+    if val > max_cutoff:
+        return 0.0
+    if val < min_ideal:
+        return (val - min_cutoff) / (min_ideal - min_cutoff)
+    if val > max_ideal:
+        return 1 - (val - max_ideal) / (max_cutoff - max_ideal)
 
-    # Map t in (0, 1) to sigmoid domain [-k, k]
-    z = k * (1.0 - 2.0 * t)
-
-    # Standard sigmoid using math module
-    sigmoid = 1.0 / (1.0 + math.exp(-z))
-
-    # Rescale to ensure clean 1.0 and 0.0 endpoints
-    sig_k = 1.0 / (1.0 + math.exp(-k))
-    sig_minus_k = 1.0 / (1.0 + math.exp(k))
-
-    scaled_val = (sigmoid - sig_minus_k) / (sig_k - sig_minus_k)
-
-    return max(0.0, min(1.0, scaled_val))
+    return 1.0
 
 
 def map_open_cv_to_output_coords(pos: typing.Tuple[float, float, float]) -> typing.Tuple[float, float, float]:
@@ -93,18 +55,9 @@ def detect3d(detections_l: typing.List[Detection2D], detections_r: typing.List[D
             # 3. Also consider blob size similarity
             size_ratio = min(det_l.size, det_r.size) / max(det_l.size, det_r.size, 1e-6)
 
-            # 4. And absolute size
-            size = det_l.size + det_r.size
-
-            weights = [10, 1, 1, 1, 1, 1]
-
-            # Combined score using logistic interpolation
-            conf = np.average([logistic_interpolation(y_pixel_diff, ideal=0, cutoff=3),
-                               logistic_interpolation(pos_3d[0], ideal=0, cutoff=-200, cutoff2=200),
-                               logistic_interpolation(pos_3d[1], ideal=0, cutoff=-100, cutoff2=100),
-                               logistic_interpolation(pos_3d[2], ideal=100, cutoff=0, cutoff2=300),
-                               logistic_interpolation(size_ratio, ideal=1, cutoff=0),
-                               logistic_interpolation(size, ideal=20, cutoff=5)], weights=weights)
+            conf = normalize(y_pixel_diff, min_ideal=0, max_ideal=3.5, min_cutoff=-1, max_cutoff=15)
+            conf *= normalize(size_ratio, min_ideal=1, max_ideal=1, min_cutoff=0, max_cutoff=1.1)
+            conf *= normalize(pos_3d[2], min_ideal=10, max_ideal=150, min_cutoff=0, max_cutoff=300)
 
             detections.append(Detection3D(det_l.pos, det_r.pos, rect_l, rect_r, pos_3d, conf))
 

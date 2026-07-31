@@ -1,4 +1,5 @@
 import sys
+from enum import StrEnum
 
 import numpy as np
 import cv2
@@ -6,16 +7,27 @@ from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 
-from blob_detector import BlobDetectorConfigKeys
-from camera import CameraConfigKeys
+import blob_detector
+import camera
+from blob_detector import BlobDetectorConfigKeys, BlobDetector
+from camera import CameraConfigKeys, StereoCamera
 from config import Config
-from tracker import Tracker, TrackerConfigKeys
+from tracker import detect3d
+
+
+class TrackerConfigKeys(StrEnum):
+    stereo_conf_threshold = 'stereo_conf_threshold'
+
+
+DEFAULT_CONFIG = {
+    TrackerConfigKeys.stereo_conf_threshold: 0.5
+}
 
 
 class Worker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray, np.ndarray)
     centroid_ready = QtCore.Signal(bool, float, float, float, float)
-    position_ready = QtCore.Signal(float, float, float)
+    position_ready = QtCore.Signal(bool, float, float, float)
     stats_ready = QtCore.Signal(float, float, float, float, float)
 
     def __init__(self, config: Config):
@@ -24,20 +36,29 @@ class Worker(QtCore.QThread):
         self.running = True
 
     def run(self):
-        with Tracker(self.config) as tracker:
+        blobdetector = BlobDetector(self.config)
+        with StereoCamera(self.config) as cam:
             while self.running:
-                detection = tracker.detect()
+                stereo_frame = cam.get_stereo_frame()
 
-                self.frame_ready.emit(detection.frame.left_frame.copy(), detection.frame.right_frame.copy())
-                self.stats_ready.emit(detection.frame.frame_time_ms, detection.frame.left_time_of_capture,
-                                      detection.frame.right_time_of_capture, detection.frame.time_of_arrival,
-                                      detection.time_of_processing_finished)
-                found = detection.confidence_01 >= self.config.get(TrackerConfigKeys.stereo_conf_threshold)
-                self.centroid_ready.emit(found, detection.pos_2d_raw_l[0], detection.pos_2d_raw_l[1],
-                                         detection.pos_2d_raw_r[0],
-                                         detection.pos_2d_raw_r[1])
-                if found:
-                    self.position_ready.emit(detection.pos_3d[0], detection.pos_3d[1], detection.pos_3d[2])
+                detections_l = blobdetector.detect_candidates(stereo_frame.left_frame)
+                detections_r = blobdetector.detect_candidates(stereo_frame.right_frame)
+                detections_3d = detect3d(detections_l, detections_r, cam)
+
+                self.frame_ready.emit(stereo_frame.left_frame.copy(), stereo_frame.right_frame.copy())
+                self.stats_ready.emit(stereo_frame.frame_time_ms, stereo_frame.left_time_of_capture,
+                                      stereo_frame.right_time_of_capture, stereo_frame.time_of_arrival,
+                                      cam.get_time())
+                conf_thresh = self.config.get(TrackerConfigKeys.stereo_conf_threshold)
+                if detections_3d and detections_3d[0].confidence_01 >= conf_thresh:
+                    detection = detections_3d[0]
+                    self.centroid_ready.emit(True, detection.pos_2d_raw_l[0], detection.pos_2d_raw_l[1],
+                                             detection.pos_2d_raw_r[0],
+                                             detection.pos_2d_raw_r[1])
+                    self.position_ready.emit(True, detection.pos_3d[0], detection.pos_3d[1], detection.pos_3d[2])
+                else:
+                    self.centroid_ready.emit(False, 0, 0, 0, 0)
+                    self.position_ready.emit(False, 0, 0, 0)
 
                 self.config.do_callbacks()
 
@@ -52,7 +73,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("DepthAI Point Tracker")
         self.resize(1200, 900)
 
-        self.config = Config()
+        self.config = Config(defaults={**camera.DEFAULT_CONFIG, **blob_detector.DEFAULT_CONFIG, **DEFAULT_CONFIG})
+
+        monospace_font = QtGui.QFont("Courier New")
+        monospace_font.setStyleHint(QtGui.QFont.StyleHint.Monospace)
 
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
@@ -231,22 +255,32 @@ class MainWindow(QtWidgets.QMainWindow):
         # Info
         controls_layout.addStretch()
         controls_layout.addWidget(QtWidgets.QLabel("<b>Tracking Info</b>"))
-        self.centroid_label = QtWidgets.QLabel("Centroid: N/A")
-        controls_layout.addWidget(self.centroid_label)
+        self.left_centroid_label = QtWidgets.QLabel("Centroid L: N/A")
+        self.left_centroid_label.setFont(monospace_font)
+        controls_layout.addWidget(self.left_centroid_label)
+        self.right_centroid_label = QtWidgets.QLabel("Centroid R: N/A")
+        self.right_centroid_label.setFont(monospace_font)
+        controls_layout.addWidget(self.right_centroid_label)
         self.pos_label = QtWidgets.QLabel("XYZ: N/A")
+        self.pos_label.setFont(monospace_font)
         controls_layout.addWidget(self.pos_label)
 
         controls_layout.addSpacing(10)
         controls_layout.addWidget(QtWidgets.QLabel("<b>Timing Info</b>"))
         self.frame_time_label = QtWidgets.QLabel("Frame time: N/A")
+        self.frame_time_label.setFont(monospace_font)
         controls_layout.addWidget(self.frame_time_label)
         self.capture_latency_label = QtWidgets.QLabel("Capture latency: N/A")
+        self.capture_latency_label.setFont(monospace_font)
         controls_layout.addWidget(self.capture_latency_label)
         self.processing_latency_label = QtWidgets.QLabel("Processing latency: N/A")
+        self.processing_latency_label.setFont(monospace_font)
         controls_layout.addWidget(self.processing_latency_label)
         self.total_latency_label = QtWidgets.QLabel("Total latency: N/A")
+        self.total_latency_label.setFont(monospace_font)
         controls_layout.addWidget(self.total_latency_label)
         self.lr_diff_label = QtWidgets.QLabel("L-R frame diff: N/A")
+        self.lr_diff_label.setFont(monospace_font)
         controls_layout.addWidget(self.lr_diff_label)
 
         # Right Panel: Visuals
@@ -420,8 +454,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # OpenCV is Y down, UI is Y up
             y_l = frame_h - pos_2d_raw_l_y
             y_r = frame_h - pos_2d_raw_r_y
-            text_l = f"L: {pos_2d_raw_l_x:.1f}, {y_l:.1f}"
-            text_r = f"R: {pos_2d_raw_r_x:.1f}, {y_r:.1f}"
+            text_l = f"{pos_2d_raw_l_x:5.1f}, {y_l:5.1f}"
+            text_r = f"{pos_2d_raw_r_x:5.1f}, {y_r:5.1f}"
             self.crosshair_v_l.setPos(pos_2d_raw_l_x)
             self.crosshair_h_l.setPos(y_l)
             self.crosshair_v_l.show()
@@ -431,49 +465,52 @@ class MainWindow(QtWidgets.QMainWindow):
             self.crosshair_v_r.show()
             self.crosshair_h_r.show()
         else:
-            text_l = "L: N/A"
-            text_r = "R: N/A"
+            text_l = "N/A"
+            text_r = "N/A"
             self.crosshair_v_l.hide()
             self.crosshair_h_l.hide()
             self.crosshair_v_r.hide()
             self.crosshair_h_r.hide()
 
-        self.centroid_label.setText(f"Centroid: {text_l} | {text_r}")
+        self.left_centroid_label.setText(f"Centroid L: {text_l}")
+        self.right_centroid_label.setText(f"Centroid R: {text_r}")
 
-    @QtCore.Slot(float, float, float)
-    def on_position(self, pos_x: float, pos_y: float, pos_z: float):
-        self.pos_label.setText(f"XYZ: {pos_x:.2f}, {pos_y:.2f}, {pos_z:.2f}")
-        # Flip z and y to transform to the space of the UI view
-        self.pos_marker.setData(pos=np.array([[pos_x, pos_z, pos_y]]))
-        self.data_x.append(pos_x)
-        self.data_y.append(pos_y)
-        self.data_z.append(pos_z)
-        if len(self.data_x) > self.max_points:
-            self.data_x.pop(0)
-            self.data_y.pop(0)
-            self.data_z.pop(0)
-        self.curve_x.setData(self.data_x)
-        self.curve_y.setData(self.data_y)
-        self.curve_z.setData(self.data_z)
+    @QtCore.Slot(bool, float, float, float)
+    def on_position(self, found: bool, pos_x: float, pos_y: float, pos_z: float):
+        text = f"XYZ: {pos_x:7.2f}, {pos_y:7.2f}, {pos_z:7.2f}" if found else "XYZ: N/A"
+        self.pos_label.setText(text)
+        if found:
+            # Flip z and y to transform to the space of the UI view
+            self.pos_marker.setData(pos=np.array([[pos_x, pos_z, pos_y]]))
+            self.data_x.append(pos_x)
+            self.data_y.append(pos_y)
+            self.data_z.append(pos_z)
+            if len(self.data_x) > self.max_points:
+                self.data_x.pop(0)
+                self.data_y.pop(0)
+                self.data_z.pop(0)
+            self.curve_x.setData(self.data_x)
+            self.curve_y.setData(self.data_y)
+            self.curve_z.setData(self.data_z)
 
     @QtCore.Slot(float, float, float, float, float)
     def on_stats(self, frame_time: float, time_of_capture_l: float, time_of_capture_r: float, time_of_arrival: float,
                  time_of_3d_detection: float):
         fps = float(1000.0 / frame_time)
-        self.frame_time_label.setText(f"Frame time: {frame_time:.1f}ms ({fps:.1f} FPS)")
+        self.frame_time_label.setText(f"Frame time: {frame_time:5.1f}ms ({fps:5.1f} FPS)")
         l_arrival = (time_of_arrival - time_of_capture_l) * 1e3
-        self.capture_latency_label.setText(f"Capture latency: {l_arrival:.1f}ms")
+        self.capture_latency_label.setText(f"Capture latency: {l_arrival:5.1f}ms")
         if time_of_3d_detection >= 0:
             l_processing = (time_of_3d_detection - time_of_arrival) * 1e3
-            self.processing_latency_label.setText(f"Processing latency: {l_processing:.1f}ms")
+            self.processing_latency_label.setText(f"Processing latency: {l_processing:5.1f}ms")
             l_total = l_arrival + l_processing
-            self.total_latency_label.setText(f"Total latency: {l_total:.1f}ms")
+            self.total_latency_label.setText(f"Total latency: {l_total:5.1f}ms")
         else:
             self.processing_latency_label.setText("Processing latency: N/A")
             self.total_latency_label.setText("Total latency: N/A")
 
         diff_ts = (time_of_capture_r - time_of_capture_l) * 1e6
-        self.lr_diff_label.setText(f"L-R frame diff: {diff_ts:.1f}µs")
+        self.lr_diff_label.setText(f"L-R frame diff: {diff_ts:5.1f}µs")
 
     def closeEvent(self, event):
         self.worker.stop()

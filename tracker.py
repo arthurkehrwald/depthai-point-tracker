@@ -1,30 +1,20 @@
 import math
 import typing
 from dataclasses import dataclass
-from enum import StrEnum
 
 import numpy as np
 
-import blob_detector
-from camera import StereoCamera, StereoFrame
-import config
+from blob_detector import Detection2D
+from camera import StereoCamera
 
-class TrackerConfigKeys(StrEnum):
-    stereo_conf_threshold = 'stereo_conf_threshold'
-
-DEFAULT_CONFIG = {
-    TrackerConfigKeys.stereo_conf_threshold: 0.5
-}
 
 @dataclass
 class Detection3D:
-    frame: StereoFrame
     pos_2d_raw_l: typing.Tuple[float, float]
     pos_2d_raw_r: typing.Tuple[float, float]
     pos_2d_rect_l: typing.Tuple[float, float]
     pos_2d_rect_r: typing.Tuple[float, float]
     pos_3d: typing.Tuple[float, float, float]
-    time_of_processing_finished: float
     confidence_01: float
 
 
@@ -83,62 +73,40 @@ def map_open_cv_to_output_coords(pos: typing.Tuple[float, float, float]) -> typi
     return pos[0], -pos[1], pos[2]
 
 
-class Tracker:
-    def __init__(self, config: config.Config):
-        super().__init__()
-        self.config = config
-        self.blob_detector = blob_detector.BlobDetector(self.config)
+def detect3d(detections_l: typing.List[Detection2D], detections_r: typing.List[Detection2D],
+             stereo_cam: StereoCamera) -> typing.List[Detection3D]:
+    if not detections_l or not detections_r:
+        return []
 
-    def __enter__(self):
-        self.stereo_cam = StereoCamera(self.config)
-        self.stereo_cam.start()
-        return self
+    rect_coords_l = stereo_cam.rectify_points([d.pos for d in detections_l], is_left=True)
+    rect_coords_r = stereo_cam.rectify_points([d.pos for d in detections_r], is_left=False)
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.stereo_cam.stop()
+    detections = []
+    for det_l, rect_l in zip(detections_l, rect_coords_l):
+        for det_r, rect_r in zip(detections_r, rect_coords_r):
+            # 1. Epipolar constraint: Corresponding points must have very similar Y-coordinates in image space
+            y_pixel_diff = abs(rect_l[1] - rect_r[1])
 
-    def detect(self):
-        stereo_frame = self.stereo_cam.get_stereo_frame()
+            # 2. Plausibility of 3D position
+            pos_3d = stereo_cam.triangulate((rect_l[0], rect_l[1]), (rect_r[0], rect_r[1]))
 
-        detections_l = self.blob_detector.detect_candidates(stereo_frame.left_frame)
-        detections_r = self.blob_detector.detect_candidates(stereo_frame.right_frame)
-        best_match = Detection3D(stereo_frame, (0, 0), (0, 0), (0, 0), (0, 0), (0, 0, 0), -1, 0)
-        if not detections_l or not detections_r:
-            return best_match
-        rect_coords_l = self.stereo_cam.rectify_points([(d.x, d.y) for d in detections_l], is_left=True)
-        rect_coords_r = self.stereo_cam.rectify_points([(d.x, d.y) for d in detections_r], is_left=False)
+            # 3. Also consider blob size similarity
+            size_ratio = min(det_l.size, det_r.size) / max(det_l.size, det_r.size, 1e-6)
 
-        for det_l, rect_l in zip(detections_l, rect_coords_l):
-            for det_r, rect_r in zip(detections_r, rect_coords_r):
-                # 1. Epipolar constraint: Corresponding points must have very similar Y-coordinates in image space
-                y_pixel_diff = abs(rect_l[1] - rect_r[1])
+            # 4. And absolute size
+            size = det_l.size + det_r.size
 
-                # 2. Plausibility of 3D position
-                pos_3d = self.stereo_cam.triangulate((rect_l[0], rect_l[1]), (rect_r[0], rect_r[1]))
+            weights = [10, 1, 1, 1, 1, 1]
 
-                # 3. Also consider blob size similarity
-                size_ratio = min(det_l.size, det_r.size) / max(det_l.size, det_r.size, 1e-6)
+            # Combined score using logistic interpolation
+            conf = np.average([logistic_interpolation(y_pixel_diff, ideal=0, cutoff=3),
+                               logistic_interpolation(pos_3d[0], ideal=0, cutoff=-200, cutoff2=200),
+                               logistic_interpolation(pos_3d[1], ideal=0, cutoff=-100, cutoff2=100),
+                               logistic_interpolation(pos_3d[2], ideal=100, cutoff=0, cutoff2=300),
+                               logistic_interpolation(size_ratio, ideal=1, cutoff=0),
+                               logistic_interpolation(size, ideal=20, cutoff=5)], weights=weights)
 
-                # 4. And absolute size
-                size = det_l.size + det_r.size
+            detections.append(Detection3D(det_l.pos, det_r.pos, rect_l, rect_r, pos_3d, conf))
 
-                weights = [10, 1, 1, 1, 1, 1]
-
-                # Combined score using logistic interpolation
-                conf = np.average([logistic_interpolation(y_pixel_diff, ideal=0, cutoff=3),
-                                   logistic_interpolation(pos_3d[0], ideal=0, cutoff=-200, cutoff2=200),
-                                   logistic_interpolation(pos_3d[1], ideal=0, cutoff=-100, cutoff2=100),
-                                   logistic_interpolation(pos_3d[2], ideal=100, cutoff=0, cutoff2=300),
-                                   logistic_interpolation(size_ratio, ideal=1, cutoff=0),
-                                   logistic_interpolation(size, ideal=20, cutoff=5)], weights=weights)
-
-                if conf > best_match.confidence_01:
-                    best_match.pos_2d_raw_l = det_l.x, det_l.y
-                    best_match.pos_2d_raw_r = det_r.x, det_r.y
-                    best_match.pos_3d = map_open_cv_to_output_coords(pos_3d)
-                    best_match.pos_2d_rect_l = rect_l
-                    best_match.pos_2d_rect_r = rect_r
-                    best_match.time_of_processing_finished = self.stereo_cam.get_time()
-                    best_match.confidence_01 = float(conf)
-
-        return best_match
+    detections.sort(key=lambda d: d.confidence_01, reverse=True)
+    return detections

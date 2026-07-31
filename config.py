@@ -5,20 +5,17 @@ from pathlib import Path
 
 import tomli_w
 
-import camera
-import blob_detector
-from tracker import DEFAULT_CONFIG as TRACKER_DEFAULTS
-
 CONFIG_FILE = "config.toml"
 ConfigValue = float | int
 
+
 class Config:
-    def __init__(self, config_file: str = CONFIG_FILE) -> None:
+    def __init__(self, config_file: str = CONFIG_FILE, defaults: typing.Dict[str, ConfigValue] | None = None) -> None:
         self._config_path = Path(config_file)
         self._lock = threading.Lock()
         with self._lock:
             self._values: typing.Dict[str, ConfigValue] = self._load_file()
-        self._defaults: typing.Dict[str, ConfigValue] = {**camera.DEFAULT_CONFIG, **blob_detector.DEFAULT_CONFIG, **TRACKER_DEFAULTS}
+        self._defaults = defaults if defaults is not None else {}
         self._callbacks: typing.List[typing.Callable[[typing.List[str]], typing.Any]] = []
         self.changed_since_last_callback: typing.List[str] = []
 

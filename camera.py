@@ -7,7 +7,7 @@ import cv2
 import depthai as dai
 import numpy as np
 
-import config
+from config import Config
 
 
 class CameraConfigKeys(StrEnum):
@@ -47,7 +47,7 @@ class StereoFrame:
 
 class StereoCamera:
     def __init__(
-            self, config: config.Config
+            self, config: Config
     ):
         self.cam_params_r = None
         self.cam_params_l = None

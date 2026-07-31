@@ -8,8 +8,7 @@ from config import Config
 
 @dataclass(frozen=True)
 class Detection2D:
-    x: float
-    y: float
+    pos: typing.Tuple[float, float]
     size: float
 
 
@@ -67,7 +66,7 @@ class BlobDetector:
     def detect_candidates(self, img: cv2.typing.MatLike) -> typing.List[Detection2D]:
         keypoints = self.detector.detect(img)
         keypoints = sorted(keypoints, key=lambda kp: kp.size, reverse=True)[:10]
-        return [Detection2D(kp.pt[0], kp.pt[1], kp.size) for kp in keypoints]
+        return [Detection2D((kp.pt[0], kp.pt[1]), kp.size) for kp in keypoints]
 
     def on_config_changed(self, changed: typing.List[str]):
         if any(name.startswith("blob") for name in changed):

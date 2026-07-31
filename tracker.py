@@ -51,6 +51,7 @@ def detect3d(detections_l: typing.List[Detection2D], detections_r: typing.List[D
 
             # 2. Plausibility of 3D position
             pos_3d = stereo_cam.triangulate((rect_l[0], rect_l[1]), (rect_r[0], rect_r[1]))
+            pos_3d = map_open_cv_to_output_coords(pos_3d)
 
             # 3. Also consider blob size similarity
             size_ratio = min(det_l.size, det_r.size) / max(det_l.size, det_r.size, 1e-6)

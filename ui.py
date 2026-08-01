@@ -73,7 +73,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Exposure
         controls_layout.addWidget(QtWidgets.QLabel("Exposure (\u03bcs):"))
         self.exp_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.exp_slider.setRange(1, 3000)
+        self.exp_slider.setRange(10, 1000)
         exposure = int(self.config.get(CameraConfigKeys.exposure))
         self.exp_slider.setValue(exposure)
         self.exp_spin = QtWidgets.QSpinBox()

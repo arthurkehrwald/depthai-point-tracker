@@ -1,6 +1,8 @@
 import sys
+import time
 from enum import StrEnum
 
+import cv2
 import numpy as np
 from PySide6 import QtCore, QtWidgets
 
@@ -17,8 +19,6 @@ class TrackerConfigKeys(StrEnum):
 
 class Worker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray, np.ndarray)
-    centroid_ready = QtCore.Signal(bool, float, float, float, float)
-    candidates_ready = QtCore.Signal(list, list)
     position_ready = QtCore.Signal(bool, float, float, float, float)
     stats_ready = QtCore.Signal(float, float, float, float, float)
     recording_active = False
@@ -35,29 +35,42 @@ class Worker(QtCore.QThread):
             while self.running:
                 stereo_frame = cam.get_stereo_frame()
 
-                detections_l = blobdetector.detect_candidates(stereo_frame.left_frame)
-                detections_r = blobdetector.detect_candidates(stereo_frame.right_frame)
+                #detections_l = blobdetector.detect_candidates(stereo_frame.left_frame)
+                #detections_r = blobdetector.detect_candidates(stereo_frame.right_frame)
+                detections_l = None
+                detections_r = None
                 detections_3d = detect3d(detections_l, detections_r, cam)
 
-                self.frame_ready.emit(stereo_frame.left_frame.copy(), stereo_frame.right_frame.copy())
-                self.candidates_ready.emit(detections_l, detections_r)
+                left_frame = cv2.cvtColor(stereo_frame.left_frame, cv2.COLOR_GRAY2BGR)
+                right_frame = cv2.cvtColor(stereo_frame.right_frame, cv2.COLOR_GRAY2BGR)
+
+
+#                for det in detections_l:
+#                    cv2.circle(left_frame, (int(det.pos[0]), int(det.pos[1])), int(det.size), (0, 255, 0), 2)
+#                for det in detections_r:
+#                    cv2.circle(right_frame, (int(det.pos[0]), int(det.pos[1])), int(det.size), (0, 255, 0), 2)
+
+                conf_thresh = self.config.get(TrackerConfigKeys.stereo_conf_threshold)
+                best_det = None
+                if detections_3d and detections_3d[0].confidence_01 >= conf_thresh:
+                    best_det = detections_3d[0]
+                    for frame, pos in [(left_frame, best_det.pos_2d_raw_l), (right_frame, best_det.pos_2d_raw_r)]:
+                        x, y = int(pos[0]), int(pos[1])
+                        cv2.line(frame, (x - 10, y), (x + 10, y), (255, 0, 0), 1)
+                        cv2.line(frame, (x, y - 10), (x, y + 10), (255, 0, ), 1)
+
+                    self.position_ready.emit(True, best_det.pos_3d[0], best_det.pos_3d[1], best_det.pos_3d[2],
+                                             best_det.confidence_01)
+                    if self.recording_active and self.recorder:
+                        self.recorder.record(best_det.pos_3d[0], best_det.pos_3d[1], best_det.pos_3d[2],
+                                             stereo_frame.left_time_of_capture, best_det.confidence_01)
+                else:
+                    self.position_ready.emit(False, 0, 0, 0, 0)
+
+                self.frame_ready.emit(left_frame, right_frame)
                 self.stats_ready.emit(stereo_frame.frame_time_ms, stereo_frame.left_time_of_capture,
                                       stereo_frame.right_time_of_capture, stereo_frame.time_of_arrival,
                                       cam.get_time())
-                conf_thresh = self.config.get(TrackerConfigKeys.stereo_conf_threshold)
-                if detections_3d and detections_3d[0].confidence_01 >= conf_thresh:
-                    detection = detections_3d[0]
-                    self.centroid_ready.emit(True, detection.pos_2d_raw_l[0], detection.pos_2d_raw_l[1],
-                                             detection.pos_2d_raw_r[0],
-                                             detection.pos_2d_raw_r[1])
-                    self.position_ready.emit(True, detection.pos_3d[0], detection.pos_3d[1], detection.pos_3d[2],
-                                             detection.confidence_01)
-                    if self.recording_active and self.recorder:
-                        self.recorder.record(detection.pos_3d[0], detection.pos_3d[1], detection.pos_3d[2],
-                                             stereo_frame.left_time_of_capture, detection.confidence_01)
-                else:
-                    self.centroid_ready.emit(False, 0, 0, 0, 0)
-                    self.position_ready.emit(False, 0, 0, 0, 0)
 
                 self.config.do_callbacks()
 

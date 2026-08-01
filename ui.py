@@ -10,6 +10,7 @@ from camera import CameraConfigKeys
 import camera
 from config import Config
 from main import TrackerConfigKeys, Worker
+from tracker import detect3d, Detection3D
 from recorder import Recorder
 
 DEFAULT_CONFIG = {
@@ -263,15 +264,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vb_l.setAspectLocked(True)
         self.img_item_l = pg.ImageItem()
         self.vb_l.addItem(self.img_item_l)
-        self.crosshair_v_l = pg.InfiniteLine(angle=90, movable=False, pen='r')
-        self.crosshair_h_l = pg.InfiniteLine(angle=0, movable=False, pen='r')
-        self.vb_l.addItem(self.crosshair_v_l)
-        self.vb_l.addItem(self.crosshair_h_l)
-        self.crosshair_v_l.hide()
-        self.crosshair_h_l.hide()
-
-        self.scatter_l = pg.ScatterPlotItem(pxMode=False, pen=pg.mkPen('g', width=5), brush=pg.mkBrush(None))
-        self.vb_l.addItem(self.scatter_l)
 
         self.image_view_r = pg.GraphicsLayoutWidget()
         self.image_view_r.setBackground('gray')
@@ -281,15 +273,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vb_r.setAspectLocked(True)
         self.img_item_r = pg.ImageItem()
         self.vb_r.addItem(self.img_item_r)
-        self.crosshair_v_r = pg.InfiniteLine(angle=90, movable=False, pen='r')
-        self.crosshair_h_r = pg.InfiniteLine(angle=0, movable=False, pen='r')
-        self.vb_r.addItem(self.crosshair_v_r)
-        self.vb_r.addItem(self.crosshair_h_r)
-        self.crosshair_v_r.hide()
-        self.crosshair_h_r.hide()
-
-        self.scatter_r = pg.ScatterPlotItem(pxMode=False, pen=pg.mkPen('g', width=5), brush=pg.mkBrush(None))
-        self.vb_r.addItem(self.scatter_r)
 
         self.pred_marker_r = pg.ScatterPlotItem(size=10, pen=pg.mkPen(None), brush=pg.mkBrush('g'))
         self.vb_r.addItem(self.pred_marker_r)
@@ -298,7 +281,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # left and right previews have the same shape/aspect ratio right from
         # startup (before any real frame has been received from the worker),
         # and lock their views together so they always stay in sync.
-        blank_frame = np.zeros(self.cam_resolution, dtype=np.uint8)
+        blank_frame = np.zeros((*self.cam_resolution, 3), dtype=np.uint8)
         # Disable pyqtgraph's automatic level (brightness/contrast) scaling so the
         # preview reflects the camera's actual exposure instead of being
         # auto-stretched to the min/max of each frame, which otherwise makes
@@ -366,8 +349,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Worker thread
         self.worker = Worker(self.config)
         self.worker.frame_ready.connect(self.on_frame)
-        self.worker.centroid_ready.connect(self.on_centroid)
-        self.worker.candidates_ready.connect(self.on_candidates)
         self.worker.position_ready.connect(self.on_position)
         self.worker.stats_ready.connect(self.on_stats)
         self.worker.start()
@@ -437,47 +418,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for frame, img_item in [(frame_l, self.img_item_l), (frame_r, self.img_item_r)]:
             rotated_frame = cv2.rotate(frame, cv2.ROTATE_180)
             mirrored = cv2.flip(rotated_frame, 1)
-            img_item.setImage(mirrored.T, autoLevels=False, levels=(0, 255))
-
-    @QtCore.Slot(list, list)
-    def on_candidates(self, candidates_l: list, candidates_r: list):
-        frame_h = self.cam_resolution[1]
-        for candidates, scatter in [(candidates_l, self.scatter_l), (candidates_r, self.scatter_r)]:
-            spots = []
-            for det in candidates:
-                # OpenCV is Y down, UI is Y up
-                spots.append({'pos': (det.pos[0], frame_h - det.pos[1]), 'size': det.size})
-            scatter.setData(spots)
-
-    @QtCore.Slot(bool, float, float, float, float)
-    def on_centroid(self, is_detected: bool, pos_2d_raw_l_x: float, pos_2d_raw_l_y: float, pos_2d_raw_r_x: float,
-                    pos_2d_raw_r_y: float):
-        # Update Left
-        if is_detected:
-            frame_h = self.cam_resolution[1]
-            # OpenCV is Y down, UI is Y up
-            y_l = frame_h - pos_2d_raw_l_y
-            y_r = frame_h - pos_2d_raw_r_y
-            text_l = f"{pos_2d_raw_l_x:5.1f}, {y_l:5.1f}"
-            text_r = f"{pos_2d_raw_r_x:5.1f}, {y_r:5.1f}"
-            self.crosshair_v_l.setPos(pos_2d_raw_l_x)
-            self.crosshair_h_l.setPos(y_l)
-            self.crosshair_v_l.show()
-            self.crosshair_h_l.show()
-            self.crosshair_v_r.setPos(pos_2d_raw_r_x)
-            self.crosshair_h_r.setPos(y_r)
-            self.crosshair_v_r.show()
-            self.crosshair_h_r.show()
-        else:
-            text_l = "N/A"
-            text_r = "N/A"
-            self.crosshair_v_l.hide()
-            self.crosshair_h_l.hide()
-            self.crosshair_v_r.hide()
-            self.crosshair_h_r.hide()
-
-        self.left_centroid_label.setText(f"Centroid L: {text_l}")
-        self.right_centroid_label.setText(f"Centroid R: {text_r}")
+            # Convert BGR to RGB for pyqtgraph
+            rgb_frame = cv2.cvtColor(mirrored, cv2.COLOR_BGR2RGB)
+            img_item.setImage(np.swapaxes(rgb_frame, 0, 1), autoLevels=False, levels=(0, 255))
 
     @QtCore.Slot(bool, float, float, float, float)
     def on_position(self, found: bool, pos_x: float, pos_y: float, pos_z: float, confidence: float):

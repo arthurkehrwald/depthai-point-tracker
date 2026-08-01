@@ -537,6 +537,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lr_diff_label.setStyleSheet(f"background-color: {lr_color};")
 
     def closeEvent(self, event):
-        self.worker.stop()
         self.config.save_file()
+        self.worker.stop()
         event.accept()

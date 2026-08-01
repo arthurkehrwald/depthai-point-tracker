@@ -180,6 +180,7 @@ class StereoCamera:
 
     def set_exposure(self, exp_time: int, sens_iso: int) -> None:
         msg = dai.CameraControl()
+        exp_time = min(max(10, exp_time), 1000)
         msg.setManualExposure(exp_time, sens_iso)
         self.cam_l_ctrl_q.send(msg)
         self.cam_r_ctrl_q.send(msg)

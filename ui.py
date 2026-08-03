@@ -1,5 +1,8 @@
-﻿from PySide6 import QtCore, QtWidgets, QtGui
+﻿import time
+
+from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
+pg.setConfigOption('imageAxisOrder', 'row-major')
 import pyqtgraph.opengl as gl
 import numpy as np
 import cv2
@@ -261,7 +264,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.image_view_l.addLabel("<span style='color: #00FF00; font-weight: bold;'>Left Camera</span>", row=0, col=0)
         self.vb_l = self.image_view_l.addViewBox(row=1, col=0)
         self.vb_l.setAspectLocked(True)
-        self.img_item_l = pg.ImageItem()
+        self.img_item_l = pg.ImageItem(levels=(0, 255))
         self.vb_l.addItem(self.img_item_l)
         self.crosshair_v_l = pg.InfiniteLine(angle=90, movable=False, pen='r')
         self.crosshair_h_l = pg.InfiniteLine(angle=0, movable=False, pen='r')
@@ -279,7 +282,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.image_view_r.addLabel("<span style='color: #00FF00; font-weight: bold;'>Right Camera</span>", row=0, col=0)
         self.vb_r = self.image_view_r.addViewBox(row=1, col=0)
         self.vb_r.setAspectLocked(True)
-        self.img_item_r = pg.ImageItem()
+        self.img_item_r = pg.ImageItem(levels=(0, 255))
         self.vb_r.addItem(self.img_item_r)
         self.crosshair_v_r = pg.InfiniteLine(angle=90, movable=False, pen='r')
         self.crosshair_h_r = pg.InfiniteLine(angle=0, movable=False, pen='r')
@@ -326,13 +329,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_widget = pg.PlotWidget(title="XYZ over Time")
         self.plot_widget.setMinimumSize(400, 300)
         self.plot_widget.addLegend()
+        self.pos_buffer_size = 100
+        # Uncommenting may improve performance
+        # self.plot_widget.disableAutoRange()
+        # self.plot_widget.setRange(xRange=(0, self.pos_buffer_size), yRange=(-100, 100))
+        # Only draw points that are currently visible on the screen
+        self.plot_widget.setClipToView(True)
+        # Downsample the data dynamically if there are more points than screen pixels
+        self.plot_widget.setDownsampling(mode='peak')
+        self.pos_data = np.zeros((3, self.pos_buffer_size))
+        self.pos_ptr = 0
         self.curve_x = self.plot_widget.plot(pen='r', name='X')
         self.curve_y = self.plot_widget.plot(pen='g', name='Y')
         self.curve_z = self.plot_widget.plot(pen='b', name='Z')
-        self.data_x = []
-        self.data_y = []
-        self.data_z = []
-        self.max_points = 100
         visuals_layout.addWidget(self.plot_widget)
 
         # Connect signals
@@ -369,6 +378,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.centroid_ready.connect(self.on_centroid)
         self.worker.candidates_ready.connect(self.on_candidates)
         self.worker.position_ready.connect(self.on_position)
+        self.last_pos_plot_time = 0
         self.worker.stats_ready.connect(self.on_stats)
         self.worker.start()
 
@@ -437,7 +447,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for frame, img_item in [(frame_l, self.img_item_l), (frame_r, self.img_item_r)]:
             rotated_frame = cv2.rotate(frame, cv2.ROTATE_180)
             mirrored = cv2.flip(rotated_frame, 1)
-            img_item.setImage(mirrored.T, autoLevels=False, levels=(0, 255))
+            img_item.setImage(mirrored, autoLevels=False)
 
     @QtCore.Slot(list, list)
     def on_candidates(self, candidates_l: list, candidates_r: list):
@@ -488,18 +498,21 @@ class MainWindow(QtWidgets.QMainWindow):
         color = self._get_color(confidence, 1.0, 0.0)
         self.conf_label.setStyleSheet(f"background-color: {color};")
         if found:
+            # Overwrite the oldest data
+            self.pos_data[0, self.pos_ptr] = pos_x
+            self.pos_data[1, self.pos_ptr] = pos_y
+            self.pos_data[2, self.pos_ptr] = pos_z
+            self.pos_ptr = (self.pos_ptr + 1) % self.pos_buffer_size
             # Flip z and y to transform to the space of the UI view
             self.pos_marker.setData(pos=np.array([[pos_x, pos_z, pos_y]]))
-            self.data_x.append(pos_x)
-            self.data_y.append(pos_y)
-            self.data_z.append(pos_z)
-            if len(self.data_x) > self.max_points:
-                self.data_x.pop(0)
-                self.data_y.pop(0)
-                self.data_z.pop(0)
-            self.curve_x.setData(self.data_x)
-            self.curve_y.setData(self.data_y)
-            self.curve_z.setData(self.data_z)
+        time_since_last_plot = time.monotonic() - self.last_pos_plot_time
+        if time_since_last_plot > 1.0 / 30: # Plot at 30 FPS
+            self.last_pos_plot_time = time.monotonic()
+            # Roll the array so the newest data is on the right
+            # For small buffer sizes (<10,000), np.roll is extremely fast
+            self.curve_x.setData(np.roll(self.pos_data[0], -self.pos_ptr))
+            self.curve_y.setData(np.roll(self.pos_data[1], -self.pos_ptr))
+            self.curve_z.setData(np.roll(self.pos_data[2], -self.pos_ptr))
 
     @QtCore.Slot(float, float, float, float, float)
     def on_stats(self, frame_time: float, time_of_capture_l: float, time_of_capture_r: float, time_of_arrival: float,

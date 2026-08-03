@@ -386,7 +386,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker = Worker(self.config)
         self.worker.frame_ready.connect(self.on_frame)
         self.worker.centroid_ready.connect(self.on_centroid)
-        self.worker.candidates_ready.connect(self.on_candidates)
         self.worker.position_ready.connect(self.on_position)
         self.worker.stats_ready.connect(self.on_stats)
         self.worker.start()
@@ -463,10 +462,6 @@ class MainWindow(QtWidgets.QMainWindow):
         ]:
             img_item.setImage(frame, autoLevels=False)
             overlay_item.setImage(overlay, autoLevels=False)
-
-    @QtCore.Slot(list, list)
-    def on_candidates(self, candidates_l: list, candidates_r: list):
-        pass
 
     @QtCore.Slot(bool, float, float, float, float)
     def on_centroid(self, is_detected: bool, pos_2d_raw_l_x: float, pos_2d_raw_l_y: float, pos_2d_raw_r_x: float,

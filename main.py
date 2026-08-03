@@ -20,7 +20,6 @@ class TrackerConfigKeys(StrEnum):
 class Worker(QtCore.QThread):
     frame_ready = QtCore.Signal(np.ndarray, np.ndarray, np.ndarray, np.ndarray)
     centroid_ready = QtCore.Signal(bool, float, float, float, float)
-    candidates_ready = QtCore.Signal(list, list)
     position_ready = QtCore.Signal(bool, float, float, float, float, float)
     stats_ready = QtCore.Signal(float, float, float, float, float)
     recording_active = False
@@ -75,7 +74,6 @@ class Worker(QtCore.QThread):
 
                 self.frame_ready.emit(stereo_frame.left_frame.copy(), stereo_frame.right_frame.copy(),
                                       overlay_l, overlay_r)
-                self.candidates_ready.emit(detections_l, detections_r)
                 self.stats_ready.emit(stereo_frame.frame_time_ms, stereo_frame.left_time_of_capture,
                                       stereo_frame.right_time_of_capture, stereo_frame.time_of_arrival,
                                       camera.get_time())

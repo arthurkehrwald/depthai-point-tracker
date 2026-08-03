@@ -18,12 +18,12 @@ class Recorder:
         
         self.file = open(self.filepath, 'w', newline='')
         self.writer = csv.writer(self.file)
-        self.writer.writerow(['x', 'y', 'z', 'capture_time', 'confidence'])
+        self.writer.writerow(['x', 'y', 'z', 'capture_time', 'detection_time', 'confidence'])
         return self.filepath
 
-    def record(self, x, y, z, capture_time, confidence):
+    def record(self, x, y, z, capture_time, detection_time, confidence):
         if self.writer:
-            self.writer.writerow([x, y, z, capture_time, confidence])
+            self.writer.writerow([x, y, z, capture_time, detection_time, confidence])
 
     def stop(self):
         if self.file:

@@ -46,6 +46,7 @@ class Worker(QtCore.QThread):
                 detections_l = blobdetector.detect_candidates(stereo_frame.left_frame)
                 detections_r = blobdetector.detect_candidates(stereo_frame.right_frame)
                 detections_3d = detect3d(detections_l, detections_r, cam)
+                detection_time = camera.get_time()
 
                 detection = None
                 conf_thresh = self.config.get(TrackerConfigKeys.stereo_conf_threshold)
@@ -53,14 +54,14 @@ class Worker(QtCore.QThread):
                     detection = detections_3d[0]
                     if self.recording_active and self.recorder:
                         self.recorder.record(detection.pos_3d[0], detection.pos_3d[1], detection.pos_3d[2],
-                                             stereo_frame.left_time_of_capture, detection.confidence_01)
+                                             stereo_frame.left_time_of_capture, detection_time, detection.confidence_01)
 
                 result = TrackingData(
                     stereo_frame=stereo_frame,
                     detections_l=detections_l,
                     detections_r=detections_r,
                     detection_3d=detection,
-                    timestamp=camera.get_time()
+                    timestamp=detection_time
                 )
                 self.result_ready.emit(result)
 

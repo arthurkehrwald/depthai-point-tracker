@@ -245,6 +245,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lr_diff_label.setFont(monospace_font)
         controls_layout.addWidget(self.lr_diff_label)
 
+        controls_layout.addSpacing(10)
+        fps_cap_label = QtWidgets.QLabel("The camera feed and position plot are capped at 30 FPS.")
+        fps_cap_label.setWordWrap(True)
+        fps_cap_label.setStyleSheet("font-style: italic; color: gray;")
+        controls_layout.addWidget(fps_cap_label)
+
         # Right Panel: Visuals
         visuals_layout = QtWidgets.QVBoxLayout()
         main_layout.addLayout(visuals_layout)

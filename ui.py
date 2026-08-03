@@ -1,5 +1,7 @@
 ﻿import time
+import typing
 
+import cv2
 from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 
@@ -12,7 +14,7 @@ import blob_detector
 from camera import CameraConfigKeys
 import camera
 from config import Config
-from main import TrackerConfigKeys, Worker
+from main import TrackerConfigKeys, Worker, TrackingData
 from recorder import Recorder
 
 DEFAULT_CONFIG = {
@@ -384,10 +386,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Worker thread
         self.worker = Worker(self.config)
-        self.worker.frame_ready.connect(self.on_frame)
-        self.worker.centroid_ready.connect(self.on_centroid)
-        self.worker.position_ready.connect(self.on_position)
-        self.worker.stats_ready.connect(self.on_stats)
+        self.worker.result_ready.connect(self.on_result)
         self.worker.start()
 
     def update_exposure(self, val):
@@ -450,107 +449,108 @@ class MainWindow(QtWidgets.QMainWindow):
         b = 0
         return f"#{r:02x}{g:02x}{b:02x}"
 
-    @QtCore.Slot(np.ndarray, np.ndarray, np.ndarray, np.ndarray)
-    def on_frame(self, frame_l: np.ndarray, frame_r: np.ndarray, overlay_l: np.ndarray, overlay_r: np.ndarray):
-        time_since_last_update = time.monotonic() - self.last_img_update_time
-        if time_since_last_update < 1.0 / 30:
-            return
-        self.last_img_update_time = time.monotonic()
-        for frame, overlay, img_item, overlay_item in [
-            (frame_l, overlay_l, self.img_item_l, self.overlay_item_l),
-            (frame_r, overlay_r, self.img_item_r, self.overlay_item_r)
-        ]:
-            img_item.setImage(frame, autoLevels=False)
-            overlay_item.setImage(overlay, autoLevels=False)
-
-    @QtCore.Slot(bool, float, float, float, float)
-    def on_centroid(self, is_detected: bool, pos_2d_raw_l_x: float, pos_2d_raw_l_y: float, pos_2d_raw_r_x: float,
-                    pos_2d_raw_r_y: float):
-        # Update Left
-        if is_detected:
-            frame_h = self.cam_resolution[1]
-            # OpenCV is Y down, UI is Y up
-            y_l = frame_h - pos_2d_raw_l_y
-            y_r = frame_h - pos_2d_raw_r_y
-            text_l = f"{pos_2d_raw_l_x:5.1f}, {y_l:5.1f}"
-            text_r = f"{pos_2d_raw_r_x:5.1f}, {y_r:5.1f}"
-        else:
-            text_l = "N/A"
-            text_r = "N/A"
-
-        self.left_centroid_label.setText(f"Centroid L: {text_l}")
-        self.right_centroid_label.setText(f"Centroid R: {text_r}")
-
-    @QtCore.Slot(bool, float, float, float, float, float)
-    def on_position(self, found: bool, pos_x: float, pos_y: float, pos_z: float, confidence: float, timestamp: float):
-        text = f"XYZ: {pos_x:7.2f}, {pos_y:7.2f}, {pos_z:7.2f}" if found else "XYZ: N/A"
-        self.pos_label.setText(text)
-        conf_text = f"Confidence: {confidence:3.2f}"
-        self.conf_label.setText(conf_text)
-        color = self._get_color(confidence, 1.0, 0.0)
-        self.conf_label.setStyleSheet(f"background-color: {color};")
-
-        time_since_last_plot_update = time.monotonic() - self.last_pos_plot_update_time
-        if time_since_last_plot_update < 1.0 / 30:
-            return
-
-        if found:
-            self.pos_history.append((timestamp, pos_x, pos_y, pos_z))
-            # Flip z and y to transform to the space of the UI view
-            self.pos_marker.setData(pos=np.array([[pos_x, pos_z, pos_y]]))
-
-        # Remove points older than 1000ms
-        while self.pos_history and (camera.get_time() - self.pos_history[0][0]) > 1.0:
-            self.pos_history.pop(0)
-
-        if not self.pos_history:
-            for curve in [self.curve_x, self.curve_y, self.curve_z]:
-                curve.setData([], [])
-            return
-
-        data = np.array(self.pos_history)
-        ts, xs, ys, zs = data[:, 0], data[:, 1], data[:, 2], data[:, 3]
-
-        rel_ts_ms = (ts - camera.get_time()) * 1000.0
-
-        self.curve_x.setData(rel_ts_ms, xs)
-        self.curve_y.setData(rel_ts_ms, ys)
-        self.curve_z.setData(rel_ts_ms, zs)
-
-    @QtCore.Slot(float, float, float, float, float)
-    def on_stats(self, frame_time: float, time_of_capture_l: float, time_of_capture_r: float, time_of_arrival: float,
-                 time_of_3d_detection: float):
+    @QtCore.Slot(TrackingData)
+    def on_result(self, result: TrackingData):
+        # Update FPS and Latency Stats
+        frame_time = result.stereo_frame.frame_time_ms
         fps = float(1000.0 / frame_time)
         self.frame_time_label.setText(f"Frame time: {frame_time:5.1f}ms ({fps:5.1f} FPS)")
         target_period = 1000.0 / self.target_fps
         ft_color = self._get_color(frame_time, target_period, 1.2 * target_period)
         self.frame_time_label.setStyleSheet(f"background-color: {ft_color};")
 
-        l_arrival = (time_of_arrival - time_of_capture_l) * 1e3
+        l_arrival = (result.stereo_frame.time_of_arrival - result.stereo_frame.left_time_of_capture) * 1e3
         self.capture_latency_label.setText(f"Capture latency: {l_arrival:5.1f}ms")
         cl_color = self._get_color(l_arrival, 15, 50)
         self.capture_latency_label.setStyleSheet(f"background-color: {cl_color};")
 
-        if time_of_3d_detection >= 0:
-            l_processing = (time_of_3d_detection - time_of_arrival) * 1e3
-            self.processing_latency_label.setText(f"Processing latency: {l_processing:5.1f}ms")
-            pl_color = self._get_color(l_processing, 1, 5)
-            self.processing_latency_label.setStyleSheet(f"background-color: {pl_color};")
+        l_processing = (result.timestamp - result.stereo_frame.time_of_arrival) * 1e3
+        self.processing_latency_label.setText(f"Processing latency: {l_processing:5.1f}ms")
+        pl_color = self._get_color(l_processing, 1, 5)
+        self.processing_latency_label.setStyleSheet(f"background-color: {pl_color};")
 
-            l_total = l_arrival + l_processing
-            self.total_latency_label.setText(f"Total latency: {l_total:5.1f}ms")
-            tl_color = self._get_color(l_total, 16, 55)
-            self.total_latency_label.setStyleSheet(f"background-color: {tl_color};")
-        else:
-            self.processing_latency_label.setText("Processing latency: N/A")
-            self.processing_latency_label.setStyleSheet("")
-            self.total_latency_label.setText("Total latency: N/A")
-            self.total_latency_label.setStyleSheet("")
+        l_total = l_arrival + l_processing
+        self.total_latency_label.setText(f"Total latency: {l_total:5.1f}ms")
+        tl_color = self._get_color(l_total, 16, 55)
+        self.total_latency_label.setStyleSheet(f"background-color: {tl_color};")
 
-        diff_ts = (time_of_capture_r - time_of_capture_l) * 1e6
+        diff_ts = (result.stereo_frame.right_time_of_capture - result.stereo_frame.left_time_of_capture) * 1e6
         self.lr_diff_label.setText(f"L-R frame diff: {diff_ts:5.1f}µs")
         lr_color = self._get_color(diff_ts, 20, 100)
         self.lr_diff_label.setStyleSheet(f"background-color: {lr_color};")
+
+        # Update Centroid Labels
+        if result.detection_3d:
+            frame_h = self.cam_resolution[1]
+            y_l = frame_h - result.detection_3d.pos_2d_raw_l[1]
+            y_r = frame_h - result.detection_3d.pos_2d_raw_r[1]
+            text_l = f"{result.detection_3d.pos_2d_raw_l[0]:5.1f}, {y_l:5.1f}"
+            text_r = f"{result.detection_3d.pos_2d_raw_r[0]:5.1f}, {y_r:5.1f}"
+            self.pos_history.append((result.stereo_frame.left_time_of_capture,
+                                     result.detection_3d.pos_3d[0],
+                                     result.detection_3d.pos_3d[1],
+                                     result.detection_3d.pos_3d[2]))
+            self.pos_marker.setData(pos=np.array([[result.detection_3d.pos_3d[0],
+                                                   result.detection_3d.pos_3d[2],
+                                                   result.detection_3d.pos_3d[1]]]))
+            self.pos_label.setText(f"XYZ: {result.detection_3d.pos_3d[0]:7.2f}, "
+                                   f"{result.detection_3d.pos_3d[1]:7.2f}, "
+                                   f"{result.detection_3d.pos_3d[2]:7.2f}")
+            self.conf_label.setText(f"Confidence: {result.detection_3d.confidence_01:3.2f}")
+            self.conf_label.setStyleSheet(f"background-color: {self._get_color(result.detection_3d.confidence_01, 1.0, 0.0)};")
+        else:
+            text_l = "N/A"
+            text_r = "N/A"
+            self.pos_label.setText("XYZ: N/A")
+            self.conf_label.setText("Confidence: N/A")
+            self.conf_label.setStyleSheet("")
+
+        self.left_centroid_label.setText(f"Centroid L: {text_l}")
+        self.right_centroid_label.setText(f"Centroid R: {text_r}")
+
+        # Update Images xyz plot at 30 FPS
+        time_since_last_update = time.monotonic() - self.last_img_update_time
+        if time_since_last_update >= 1.0 / 30:
+            self.last_img_update_time = time.monotonic()
+            overlay_l, overlay_r = self.create_overlays(result)
+            self.img_item_l.setImage(result.stereo_frame.left_frame, autoLevels=False)
+            self.img_item_r.setImage(result.stereo_frame.right_frame, autoLevels=False)
+            self.overlay_item_l.setImage(overlay_l, autoLevels=False)
+            self.overlay_item_r.setImage(overlay_r, autoLevels=False)
+
+            # Update XYZ plot
+            while self.pos_history and (camera.get_time() - self.pos_history[0][0]) > 1.0:
+                self.pos_history.pop(0)
+
+            data = np.array(self.pos_history)
+            ts, xs, ys, zs = data[:, 0], data[:, 1], data[:, 2], data[:, 3]
+
+            rel_ts_ms = (ts - camera.get_time()) * 1000.0
+
+            self.curve_x.setData(rel_ts_ms, xs)
+            self.curve_y.setData(rel_ts_ms, ys)
+            self.curve_z.setData(rel_ts_ms, zs)
+
+    def create_overlays(self, result: TrackingData) -> typing.Tuple[np.ndarray, np.ndarray]:
+        h, w = result.stereo_frame.left_frame.shape
+        oh, ow = h // 2, w // 2
+        overlay_l = np.zeros((oh, ow), dtype=np.uint8)
+        overlay_r = np.zeros((oh, ow), dtype=np.uint8)
+
+        for det in result.detections_l:
+            cv2.circle(overlay_l, (int(det.pos[0] / 2), int(det.pos[1] / 2)), int(det.size / 4), 255, 2)
+        for det in result.detections_r:
+            cv2.circle(overlay_r, (int(det.pos[0] / 2), int(det.pos[1] / 2)), int(det.size / 4), 255, 2)
+
+        if result.detection_3d:
+            for img, pos in [(overlay_l, result.detection_3d.pos_2d_raw_l),
+                             (overlay_r, result.detection_3d.pos_2d_raw_r)]:
+                x, y = int(pos[0] / 2), int(pos[1] / 2)
+                line_length = 1000
+                cv2.line(img, (x - line_length, y), (x + line_length, y), 255, 2)
+                cv2.line(img, (x, y - line_length), (x, y + line_length), 255, 2)
+
+        return overlay_l, overlay_r
 
     def closeEvent(self, event):
         self.config.save_file()

@@ -522,14 +522,15 @@ class MainWindow(QtWidgets.QMainWindow):
             while self.pos_history and (camera.get_time() - self.pos_history[0][0]) > 1.0:
                 self.pos_history.pop(0)
 
-            data = np.array(self.pos_history)
-            ts, xs, ys, zs = data[:, 0], data[:, 1], data[:, 2], data[:, 3]
+            if (self.pos_history):
+                data = np.array(self.pos_history)
+                ts, xs, ys, zs = data[:, 0], data[:, 1], data[:, 2], data[:, 3]
 
-            rel_ts_ms = (ts - camera.get_time()) * 1000.0
+                rel_ts_ms = (ts - camera.get_time()) * 1000.0
 
-            self.curve_x.setData(rel_ts_ms, xs)
-            self.curve_y.setData(rel_ts_ms, ys)
-            self.curve_z.setData(rel_ts_ms, zs)
+                self.curve_x.setData(rel_ts_ms, xs)
+                self.curve_y.setData(rel_ts_ms, ys)
+                self.curve_z.setData(rel_ts_ms, zs)
 
     def create_overlays(self, result: TrackingData) -> typing.Tuple[np.ndarray, np.ndarray]:
         h, w = result.stereo_frame.left_frame.shape

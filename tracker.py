@@ -1,8 +1,5 @@
-import math
 import typing
 from dataclasses import dataclass
-
-import numpy as np
 
 from blob_detector import Detection2D
 from camera import StereoCamera

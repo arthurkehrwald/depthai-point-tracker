@@ -4,8 +4,6 @@ from enum import StrEnum
 from dataclasses import dataclass, field
 import typing
 
-import numpy as np
-import cv2
 from PySide6 import QtCore, QtWidgets
 
 from blob_detector import BlobDetector, Detection2D

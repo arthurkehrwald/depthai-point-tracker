@@ -5,7 +5,6 @@ import pyqtgraph as pg
 pg.setConfigOption('imageAxisOrder', 'row-major')
 import pyqtgraph.opengl as gl
 import numpy as np
-import cv2
 
 from blob_detector import BlobDetectorConfigKeys
 import blob_detector
@@ -257,6 +256,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # Image Previews (Vertical)
         camera_layout = QtWidgets.QVBoxLayout()
         top_visuals.addLayout(camera_layout, stretch=5)
+        self.last_img_update_time = 0
+        img_transform= QtGui.QTransform()
+        img_transform.scale(1, -1)
 
         self.image_view_l = pg.GraphicsLayoutWidget()
         self.image_view_l.setBackground('gray')
@@ -265,16 +267,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vb_l = self.image_view_l.addViewBox(row=1, col=0)
         self.vb_l.setAspectLocked(True)
         self.img_item_l = pg.ImageItem(levels=(0, 255))
+        self.img_item_l.setTransform(img_transform)
         self.vb_l.addItem(self.img_item_l)
-        self.crosshair_v_l = pg.InfiniteLine(angle=90, movable=False, pen='r')
-        self.crosshair_h_l = pg.InfiniteLine(angle=0, movable=False, pen='r')
-        self.vb_l.addItem(self.crosshair_v_l)
-        self.vb_l.addItem(self.crosshair_h_l)
-        self.crosshair_v_l.hide()
-        self.crosshair_h_l.hide()
 
-        self.scatter_l = pg.ScatterPlotItem(pxMode=False, pen=pg.mkPen('g', width=5), brush=pg.mkBrush(None))
-        self.vb_l.addItem(self.scatter_l)
+        # Overlay items
+        self.overlay_item_l = pg.ImageItem()
+        self.overlay_item_l.setTransform(img_transform)
+        # Scale by 2 to match full resolution
+        self.overlay_item_l.setScale(2.0)
+        # Create a green color map: from transparent green to opaque green
+        # Actually, if the input is monochrome (0-255), we want to map it to green with that intensity
+        # ImageItem.setColorMap takes a pg.ColorMap object
+        green_cmap = pg.ColorMap(pos=[0, 1.0], color=[(0, 255, 0, 0), (0, 255, 0, 255)])
+        self.overlay_item_l.setColorMap(green_cmap)
+        self.vb_l.addItem(self.overlay_item_l)
 
         self.image_view_r = pg.GraphicsLayoutWidget()
         self.image_view_r.setBackground('gray')
@@ -283,16 +289,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vb_r = self.image_view_r.addViewBox(row=1, col=0)
         self.vb_r.setAspectLocked(True)
         self.img_item_r = pg.ImageItem(levels=(0, 255))
+        self.img_item_r.setTransform(img_transform)
         self.vb_r.addItem(self.img_item_r)
-        self.crosshair_v_r = pg.InfiniteLine(angle=90, movable=False, pen='r')
-        self.crosshair_h_r = pg.InfiniteLine(angle=0, movable=False, pen='r')
-        self.vb_r.addItem(self.crosshair_v_r)
-        self.vb_r.addItem(self.crosshair_h_r)
-        self.crosshair_v_r.hide()
-        self.crosshair_h_r.hide()
 
-        self.scatter_r = pg.ScatterPlotItem(pxMode=False, pen=pg.mkPen('g', width=5), brush=pg.mkBrush(None))
-        self.vb_r.addItem(self.scatter_r)
+        self.overlay_item_r = pg.ImageItem()
+        self.overlay_item_r.setTransform(img_transform)
+        self.overlay_item_r.setScale(2.0)
+        self.overlay_item_r.setColorMap(green_cmap)
+        self.vb_r.addItem(self.overlay_item_r)
 
         self.pred_marker_r = pg.ScatterPlotItem(size=10, pen=pg.mkPen(None), brush=pg.mkBrush('g'))
         self.vb_r.addItem(self.pred_marker_r)
@@ -301,13 +305,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # left and right previews have the same shape/aspect ratio right from
         # startup (before any real frame has been received from the worker),
         # and lock their views together so they always stay in sync.
-        blank_frame = np.zeros(self.cam_resolution, dtype=np.uint8)
+        blank_frame = np.zeros((self.cam_resolution[1], self.cam_resolution[0]), dtype=np.uint8)
         # Disable pyqtgraph's automatic level (brightness/contrast) scaling so the
         # preview reflects the camera's actual exposure instead of being
         # auto-stretched to the min/max of each frame, which otherwise makes
         # dark frames appear artificially lightened.
         self.img_item_l.setImage(blank_frame, autoLevels=False, levels=(0, 255))
         self.img_item_r.setImage(blank_frame, autoLevels=False, levels=(0, 255))
+        blank_overlay = np.zeros((self.cam_resolution[1] // 2, self.cam_resolution[0] // 2), dtype=np.uint8)
+        self.overlay_item_l.setImage(blank_overlay, autoLevels=False)
+        self.overlay_item_r.setImage(blank_overlay, autoLevels=False)
         self.vb_r.setXLink(self.vb_l)
         self.vb_r.setYLink(self.vb_l)
 
@@ -442,22 +449,22 @@ class MainWindow(QtWidgets.QMainWindow):
         b = 0
         return f"#{r:02x}{g:02x}{b:02x}"
 
-    @QtCore.Slot(np.ndarray, np.ndarray)
-    def on_frame(self, frame_l: np.ndarray, frame_r: np.ndarray):
-        for frame, img_item in [(frame_l, self.img_item_l), (frame_r, self.img_item_r)]:
-            rotated_frame = cv2.rotate(frame, cv2.ROTATE_180)
-            mirrored = cv2.flip(rotated_frame, 1)
-            img_item.setImage(mirrored, autoLevels=False)
+    @QtCore.Slot(np.ndarray, np.ndarray, np.ndarray, np.ndarray)
+    def on_frame(self, frame_l: np.ndarray, frame_r: np.ndarray, overlay_l: np.ndarray, overlay_r: np.ndarray):
+        time_since_last_update = time.monotonic() - self.last_img_update_time
+        if time_since_last_update < 1.0 / 30:
+            return
+        self.last_img_update_time = time.monotonic()
+        for frame, overlay, img_item, overlay_item in [
+            (frame_l, overlay_l, self.img_item_l, self.overlay_item_l),
+            (frame_r, overlay_r, self.img_item_r, self.overlay_item_r)
+        ]:
+            img_item.setImage(frame, autoLevels=False)
+            overlay_item.setImage(overlay, autoLevels=False)
 
     @QtCore.Slot(list, list)
     def on_candidates(self, candidates_l: list, candidates_r: list):
-        frame_h = self.cam_resolution[1]
-        for candidates, scatter in [(candidates_l, self.scatter_l), (candidates_r, self.scatter_r)]:
-            spots = []
-            for det in candidates:
-                # OpenCV is Y down, UI is Y up
-                spots.append({'pos': (det.pos[0], frame_h - det.pos[1]), 'size': det.size})
-            scatter.setData(spots)
+        pass
 
     @QtCore.Slot(bool, float, float, float, float)
     def on_centroid(self, is_detected: bool, pos_2d_raw_l_x: float, pos_2d_raw_l_y: float, pos_2d_raw_r_x: float,
@@ -470,21 +477,9 @@ class MainWindow(QtWidgets.QMainWindow):
             y_r = frame_h - pos_2d_raw_r_y
             text_l = f"{pos_2d_raw_l_x:5.1f}, {y_l:5.1f}"
             text_r = f"{pos_2d_raw_r_x:5.1f}, {y_r:5.1f}"
-            self.crosshair_v_l.setPos(pos_2d_raw_l_x)
-            self.crosshair_h_l.setPos(y_l)
-            self.crosshair_v_l.show()
-            self.crosshair_h_l.show()
-            self.crosshair_v_r.setPos(pos_2d_raw_r_x)
-            self.crosshair_h_r.setPos(y_r)
-            self.crosshair_v_r.show()
-            self.crosshair_h_r.show()
         else:
             text_l = "N/A"
             text_r = "N/A"
-            self.crosshair_v_l.hide()
-            self.crosshair_h_l.hide()
-            self.crosshair_v_r.hide()
-            self.crosshair_h_r.hide()
 
         self.left_centroid_label.setText(f"Centroid L: {text_l}")
         self.right_centroid_label.setText(f"Centroid R: {text_r}")

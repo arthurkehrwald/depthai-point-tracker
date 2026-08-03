@@ -45,6 +45,10 @@ class StereoFrame:
     time_of_arrival: float
 
 
+def get_time() -> float:
+    return dai.Clock.now().total_seconds()
+
+
 class StereoCamera:
     def __init__(
             self, config: Config
@@ -184,9 +188,6 @@ class StereoCamera:
         msg.setManualExposure(exp_time, sens_iso)
         self.cam_l_ctrl_q.send(msg)
         self.cam_r_ctrl_q.send(msg)
-
-    def get_time(self) -> float:
-        return dai.Clock.now().total_seconds()
 
     def rectify_points(self, points: typing.List[typing.Tuple[float, float]], is_left: bool) -> typing.List[
         typing.Tuple[float, float]]:

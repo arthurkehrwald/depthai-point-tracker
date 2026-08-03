@@ -2,6 +2,7 @@
 
 from PySide6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
+
 pg.setConfigOption('imageAxisOrder', 'row-major')
 import pyqtgraph.opengl as gl
 import numpy as np
@@ -263,7 +264,7 @@ class MainWindow(QtWidgets.QMainWindow):
         camera_layout = QtWidgets.QVBoxLayout()
         top_visuals.addLayout(camera_layout, stretch=5)
         self.last_img_update_time = 0
-        img_transform= QtGui.QTransform()
+        img_transform = QtGui.QTransform()
         img_transform.scale(1, -1)
 
         self.image_view_l = pg.GraphicsLayoutWidget()
@@ -342,20 +343,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_widget = pg.PlotWidget(title="XYZ over Time")
         self.plot_widget.setMinimumSize(400, 300)
         self.plot_widget.addLegend()
-        self.pos_buffer_size = 100
-        # Uncommenting may improve performance
-        # self.plot_widget.disableAutoRange()
-        # self.plot_widget.setRange(xRange=(0, self.pos_buffer_size), yRange=(-100, 100))
-        # Only draw points that are currently visible on the screen
-        self.plot_widget.setClipToView(True)
-        # Downsample the data dynamically if there are more points than screen pixels
-        self.plot_widget.setDownsampling(mode='peak')
-        self.pos_data = np.zeros((3, self.pos_buffer_size))
-        self.pos_ptr = 0
+        self.plot_widget.setLabel('bottom', 'Time', units='ms')
+        self.plot_widget.setXRange(-1000, 0)
+        self.pos_buffer_size = 1000  # Max points to keep (likely fewer than this in 1s)
+        # self.pos_data will store (timestamp, x, y, z)
+        self.pos_history = []
         self.curve_x = self.plot_widget.plot(pen='r', name='X')
         self.curve_y = self.plot_widget.plot(pen='g', name='Y')
         self.curve_z = self.plot_widget.plot(pen='b', name='Z')
         visuals_layout.addWidget(self.plot_widget)
+        self.last_pos_plot_update_time = 0
 
         # Connect signals
         self.exp_slider.valueChanged.connect(self.exp_spin.setValue)
@@ -391,7 +388,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.centroid_ready.connect(self.on_centroid)
         self.worker.candidates_ready.connect(self.on_candidates)
         self.worker.position_ready.connect(self.on_position)
-        self.last_pos_plot_time = 0
         self.worker.stats_ready.connect(self.on_stats)
         self.worker.start()
 
@@ -490,30 +486,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.left_centroid_label.setText(f"Centroid L: {text_l}")
         self.right_centroid_label.setText(f"Centroid R: {text_r}")
 
-    @QtCore.Slot(bool, float, float, float, float)
-    def on_position(self, found: bool, pos_x: float, pos_y: float, pos_z: float, confidence: float):
+    @QtCore.Slot(bool, float, float, float, float, float)
+    def on_position(self, found: bool, pos_x: float, pos_y: float, pos_z: float, confidence: float, timestamp: float):
         text = f"XYZ: {pos_x:7.2f}, {pos_y:7.2f}, {pos_z:7.2f}" if found else "XYZ: N/A"
         self.pos_label.setText(text)
         conf_text = f"Confidence: {confidence:3.2f}"
         self.conf_label.setText(conf_text)
         color = self._get_color(confidence, 1.0, 0.0)
         self.conf_label.setStyleSheet(f"background-color: {color};")
+
+        time_since_last_plot_update = time.monotonic() - self.last_pos_plot_update_time
+        if time_since_last_plot_update < 1.0 / 30:
+            return
+
         if found:
-            # Overwrite the oldest data
-            self.pos_data[0, self.pos_ptr] = pos_x
-            self.pos_data[1, self.pos_ptr] = pos_y
-            self.pos_data[2, self.pos_ptr] = pos_z
-            self.pos_ptr = (self.pos_ptr + 1) % self.pos_buffer_size
+            self.pos_history.append((timestamp, pos_x, pos_y, pos_z))
             # Flip z and y to transform to the space of the UI view
             self.pos_marker.setData(pos=np.array([[pos_x, pos_z, pos_y]]))
-        time_since_last_plot = time.monotonic() - self.last_pos_plot_time
-        if time_since_last_plot > 1.0 / 30: # Plot at 30 FPS
-            self.last_pos_plot_time = time.monotonic()
-            # Roll the array so the newest data is on the right
-            # For small buffer sizes (<10,000), np.roll is extremely fast
-            self.curve_x.setData(np.roll(self.pos_data[0], -self.pos_ptr))
-            self.curve_y.setData(np.roll(self.pos_data[1], -self.pos_ptr))
-            self.curve_z.setData(np.roll(self.pos_data[2], -self.pos_ptr))
+
+        # Remove points older than 1000ms
+        while self.pos_history and (camera.get_time() - self.pos_history[0][0]) > 1.0:
+            self.pos_history.pop(0)
+
+        if not self.pos_history:
+            for curve in [self.curve_x, self.curve_y, self.curve_z]:
+                curve.setData([], [])
+            return
+
+        data = np.array(self.pos_history)
+        ts, xs, ys, zs = data[:, 0], data[:, 1], data[:, 2], data[:, 3]
+
+        rel_ts_ms = (ts - camera.get_time()) * 1000.0
+
+        self.curve_x.setData(rel_ts_ms, xs)
+        self.curve_y.setData(rel_ts_ms, ys)
+        self.curve_z.setData(rel_ts_ms, zs)
 
     @QtCore.Slot(float, float, float, float, float)
     def on_stats(self, frame_time: float, time_of_capture_l: float, time_of_capture_r: float, time_of_arrival: float,
